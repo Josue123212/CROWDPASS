@@ -17,9 +17,9 @@ router.get(
     if (db.pool) {
       try {
         await db.query("SELECT 1");
-        database = "up";
+        database = "connected";
       } catch (error) {
-        database = "down";
+        database = "disconnected";
       }
     }
 

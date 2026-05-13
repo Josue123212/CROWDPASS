@@ -2,68 +2,53 @@
 
 ## Estado actual
 
-La base tecnica del backend fue creada y las pruebas locales minimas pasan. Sin embargo, algunos puntos del `25%` dependen de recursos externos, credenciales o herramientas que no estaban disponibles durante esta ejecucion.
+El backend del `25%` ya quedo validado en condiciones reales con:
 
-## Bloqueos encontrados
+- backend Express operativo,
+- PostgreSQL de Railway conectado con URL publica,
+- `schema.sql` ejecutado,
+- `seed.sql` ejecutado,
+- `health check` respondiendo `database: "connected"`,
+- registro y login reales funcionando,
+- repositorio GitHub alineado con el estado tecnico del proyecto.
 
-### 1. Base de datos PostgreSQL real no configurada
+## Pendiente real restante
 
-- El backend ya tiene capa de conexion `pg`, modelo relacional y scripts SQL.
-- El `health check` responde correctamente, pero reporta `database: "not_configured"` mientras no exista `DATABASE_URL`.
-- No fue posible validar CRUD real contra PostgreSQL sin credenciales activas.
+### 1. Ejecucion de K6 en entorno local
 
-**Accion pendiente:**
-
-- Crear archivo `.env` a partir de `.env.example`.
-- Configurar `DATABASE_URL` de Railway o una instancia local.
-- Ejecutar `db/schema.sql`.
-- Ejecutar `db/seed.sql`.
-
----
-
-### 2. Despliegue cloud no ejecutado
-
-- La arquitectura objetivo esta preparada a nivel de codigo.
-- No se realizo despliegue real a `Render`, `Railway` ni `Vercel` porque no se proporcionaron accesos, credenciales ni servicios activos dentro del entorno.
+- El unico punto pendiente del `25%` es la prueba de carga `50-100` usuarios con `K6`.
+- El script ya existe en `k6/smoke-25.js`.
+- No se pudo ejecutar porque `K6` no esta instalado en esta maquina.
 
 **Accion pendiente:**
 
-- Crear servicios cloud.
-- Cargar variables de entorno en Render y Railway.
-- Conectar frontend y backend desplegados.
+- Instalar `K6`.
+- Ejecutar `k6 run k6/smoke-25.js`.
+- Guardar evidencia de resultados para exposicion o documentacion final.
 
----
+## Validaciones ya completadas
 
-### 3. Testing externo no ejecutado completamente
+- Git inicializado y remoto GitHub configurado.
+- Backend subido a `origin/main`.
+- `Render` mantiene estructura valida de proyecto Node.js porque `package.json` permanece en la raiz.
+- Conexion real a PostgreSQL validada.
+- Tablas y datos semilla creados correctamente.
+- Lectura real de eventos validada desde API.
+- Registro real validado.
+- Login real validado.
 
-- Se ejecutaron pruebas locales con `Jest` y `Supertest`.
-- Se dejo script `K6` preparado en `k6/smoke-25.js`.
-- No se ejecutaron pruebas reales con `K6`, `Bruno` o `Selenium` porque esas herramientas no estaban instaladas o configuradas en este entorno.
-
-**Accion pendiente:**
-
-- Ejecutar `K6` contra el backend con base de datos real.
-- Preparar coleccion de Bruno o requests manuales contra el entorno desplegado.
-- Preparar casos Selenium una vez exista frontend funcional.
-
----
-
-### 4. Repositorio Git no inicializado
-
-- El directorio actual no esta vinculado a un repositorio Git.
-- Esto no bloquea el desarrollo local, pero si afecta trazabilidad, ramas, commits y colaboracion.
-
-**Accion pendiente:**
-
-- Inicializar Git o trabajar dentro del repositorio correcto del proyecto.
-
-## Evidencia local validada
+## Evidencia tecnica disponible
 
 - `npm test` ejecutado correctamente.
-- `GET /api/health` responde `200`.
-- El servidor inicia correctamente con `npm start`.
+- `GET /api/health` responde `200` con `database: "connected"`.
+- `GET /api/events` devuelve eventos reales sembrados en base.
+- Conteo real en base:
+  - `users: 2`
+  - `events: 2`
+  - `reservations: 0`
+- Prueba real de `register/login` con generacion de JWT exitosa.
 
-## Archivos clave generados
+## Archivos clave del cierre
 
 - `src/` backend modular Express
 - `.env.example`
@@ -73,3 +58,4 @@ La base tecnica del backend fue creada y las pruebas locales minimas pasan. Sin 
 - `k6/smoke-25.js`
 - `tests/app.test.js`
 - `tests/auth.routes.test.js`
+- `ERROR_K6_NO_INSTALADO.md`
