@@ -4,6 +4,7 @@ node_modules/
 !.env.example
 coverage/
 *.log
+*.jtl
 npm-debug.log*
 necesario.txt
 .DS_Store

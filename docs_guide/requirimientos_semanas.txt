@@ -1,0 +1,73 @@
+Pasos para presentación de entregables semana 10-12-16.
+Solo presentar los puntos que se evalúan en cada entrega, si se aumenta
+algo se debe presentar mencionándolo para evitar problemas futuros. Tener
+en cuenta que cada paso faltante o en el proceso de revisión y test
+llegara a fallar, se descontara puntos al equipo. La nota es grupal. El
+único día que si o si deben estar todos presentes y bien vestidos(terno)
+es en la ultima presentación.
+Presentar documentación debidamente actualizada por presentación, no se
+necesita que este a color, pero si entendible, si llegara a aumentar
+diagramas para las pruebas de rendimiento y estrés, será mejor el
+resultado(varias pruebas para ver mejor).
+Caso exista caídas del servidor también mencionarlas, aumentar el motivo y
+la solución.
+Semana 10:
+Entrega del 25%
+- Tener preparado el entorno cloud para poder evaluar su existencia, no
+se necesita que este subido aun en el 25% del proyecto.
+- Desarrollo de los endpoints a utilizar.
+- Tener un registro y login debidamente diferenciados y funcionales.
+- Utilizar rate limits para la implementación de peticiones.
+- Tener una vista en caso de que la pagina no exista o este en
+desarrollo.
+- Control de respuestas HTTP.
+- CRUD estructurado, no implementado completo pero si un inicio.
+- Implementación de variables de entorno (.env).
+- Cifrado de contraseñas.
+- Pruebas unitarias y masivas mínimas.
+- Base de datos debidamente conectada y funcional, mostrar el
+Diagrama(editable) en la documentación.
+- Pruebas de test en el servidor con el proyecto en variables de
+aproximadamente 50 - 100.
+Extras:
+- Cifrar el código.
+- Diagrama de BD(completo).
+
+Semana 12:
+Entrega del 80%
+- CRUD completo y funcional.
+- Control de paginados con tiempos de respuesta cómodos al cliente.
+- Manejo de múltiples tipos de usuario.
+- Proyecto subido al servidor, revisión de pruebas tal sea el caso.
+- Base de datos completa, conectada y funcional, mostrar diagrama en
+documentación.
+- CORS configurados para no aceptar peticiones de orígenes inesperados.
+- Realizar pruebas previas para evitar una caída inesperada en el
+servidor o sus servicios.
+- Autentificación y autorización debidamente implementados sea el caso.
+- Ingreso mediante una cuenta de correo.
+- Manejar control de token expirados para mejora de seguridad, así como
+evitar acceder a rutas manualmente sin permiso.
+- Mostrar pantallas de errores previstos como caídas de servidor y
+respuestas a estos.
+- Pruebas de test en el servidor con el proyecto en variables de
+aproximadamente 1000 - 5000.
+- Control de backups sea el caso.
+Extras:
+- Utilizar una VPC para manejo de data sensible.
+- Sea el caso, utilizar recursos del computador para mejorar el
+rendimiento del servicio.
+
+Semana 16:
+Entrega del 100%
+- Proyecto funcional al 100%.
+- Pruebas de test en el servidor con el proyecto en variables de
+aproximadamente 10000 - 50000.
+- Controlar los cuellos de botella.
+- Tener los logs estructurados.
+- Contener errores esperados dentro del servidor, en caso de caída
+manejar los tiempos de respuesta y mostrar el motivo de la caída.
+Extras:
+- Implementación de un pipeline de CI/CD.
+- Mostrar estrategias para una posible migración de servidor sin
+ocasionar una perdida sustanciosa del servicio.
