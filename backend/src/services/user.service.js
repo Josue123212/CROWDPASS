@@ -4,6 +4,22 @@ const ApiError = require("../utils/apiError");
 const ALLOWED_ROLES = ["admin", "customer", "organizer", "staff"];
 const ALLOWED_ORGANIZER_STATUSES = ["not_requested", "pending", "approved", "rejected"];
 
+function mapUserUniqueConstraintError(error) {
+  if (error?.code !== "23505") {
+    return null;
+  }
+
+  if (error.constraint === "idx_users_document_number") {
+    return new ApiError(409, "El DNI o documento ya se encuentra registrado.");
+  }
+
+  if (error.constraint === "idx_users_phone") {
+    return new ApiError(409, "El telefono ya se encuentra registrado.");
+  }
+
+  return new ApiError(409, "Ya existe un usuario con esos datos registrados.");
+}
+
 async function getUsers({ page, limit }) {
   const offset = (page - 1) * limit;
   const [users, total] = await Promise.all([
@@ -53,7 +69,23 @@ async function updateCurrentUser(userId, profileData) {
     throw new ApiError(409, "El DNI o documento ya se encuentra registrado.");
   }
 
-  const updatedUser = await userModel.updateUserProfile(userId, profileData);
+  const duplicatedPhoneUser = await userModel.findByPhone(profileData.phone);
+
+  if (duplicatedPhoneUser && Number(duplicatedPhoneUser.id) !== Number(userId)) {
+    throw new ApiError(409, "El telefono ya se encuentra registrado.");
+  }
+
+  let updatedUser;
+
+  try {
+    updatedUser = await userModel.updateUserProfile(userId, profileData);
+  } catch (error) {
+    const mappedError = mapUserUniqueConstraintError(error);
+    if (mappedError) {
+      throw mappedError;
+    }
+    throw error;
+  }
 
   if (!updatedUser) {
     throw new ApiError(404, "Usuario no encontrado.");

@@ -90,6 +90,17 @@ async function findByDocumentNumber(documentNumber) {
   return result.rows[0] || null;
 }
 
+async function findByPhone(phone) {
+  const result = await db.query(
+    `SELECT ${USER_BASE_FIELDS}
+     FROM users
+     WHERE phone = $1`,
+    [phone]
+  );
+
+  return result.rows[0] || null;
+}
+
 async function findById(id) {
   const result = await db.query(
     `SELECT ${USER_BASE_FIELDS}
@@ -192,6 +203,7 @@ module.exports = {
   createUser,
   findByEmail,
   findByDocumentNumber,
+  findByPhone,
   findById,
   countUsers,
   listUsers,

@@ -4,7 +4,7 @@ const userRoutes = require("./user.routes");
 const eventRoutes = require("./event.routes");
 const reservationRoutes = require("./reservation.routes");
 const db = require("../config/db");
-const { success } = require("../utils/response");
+const { failure, success } = require("../utils/response");
 const asyncHandler = require("../utils/asyncHandler");
 
 const router = express.Router();
@@ -13,6 +13,7 @@ router.get(
   "/health",
   asyncHandler(async (req, res) => {
     let database = "not_configured";
+    let status = "ok";
 
     if (db.pool) {
       try {
@@ -20,13 +21,21 @@ router.get(
         database = "connected";
       } catch (error) {
         database = "disconnected";
+        status = "degraded";
       }
+    }
+
+    if (database === "disconnected") {
+      return failure(res, "Servicio degradado: la base de datos no esta disponible.", 503, {
+        status,
+        database,
+      });
     }
 
     return success(res, {
       message: "Servicio disponible.",
       data: {
-        status: "ok",
+        status,
         database,
       },
     });

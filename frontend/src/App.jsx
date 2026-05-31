@@ -12,6 +12,8 @@ const RESERVATIONS_REFRESH_INTERVAL = 15000;
 const USERS_REFRESH_INTERVAL = 5000;
 const ORGANIZER_REFRESH_INTERVAL = 10000;
 const SERVER_STATUS_INTERVAL = 10000;
+const HOME_CAROUSEL_AUTOPLAY_DESKTOP_MS = 3800;
+const HOME_CAROUSEL_AUTOPLAY_MOBILE_MS = 5200;
 
 const HERO_EVENT_IMAGE =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuCQrGBV8zgI05sX9sVGvDfJKfKItBR5jBaVrUDLo7J9dFoffYKe3c8nlcX7Ep7D34phnzfCWqlpF7zZln8ipkDyUNRNUJYHB4USYmDRd4_7LMAamDSleFAeF56rkkCjQ1qwrE5M2c5VJN3ujWK7uTlAJnBiwBFBy_-F21Ma_l4Am6bpONnrzzhxvO4BXq1I_a0PNBcHk_M3gHe8a40BFgQtYanHAoI3p6GwjIt8HiXw_o_IZI4J4VrBS8gMUrHrJJywgT1Nvzpm26a3";
@@ -61,6 +63,76 @@ const PASSWORD_RULES = [
   { id: "number", label: "Al menos un numero", test: (value) => /\d/.test(value) },
   { id: "symbol", label: "Al menos un simbolo", test: (value) => /[^A-Za-z0-9]/.test(value) },
 ];
+const REGISTER_DOCUMENT_REGEX = /^[A-Za-z0-9]{8,20}$/;
+const REGISTER_PHONE_REGEX = /^\+[1-9]\d{7,14}$/;
+
+const HOME_CATEGORY_VISUALS = [
+  {
+    matches: ["musica", "music", "concierto", "concert", "festival"],
+    icon: "music_note",
+    accent: "linear-gradient(135deg, rgba(111, 66, 193, 0.96), rgba(77, 68, 227, 0.92))",
+    surface: "rgba(241, 235, 255, 0.96)",
+  },
+  {
+    matches: ["teatro", "comedia", "stand", "show", "humor"],
+    icon: "theater_comedy",
+    accent: "linear-gradient(135deg, rgba(249, 115, 22, 0.96), rgba(245, 158, 11, 0.92))",
+    surface: "rgba(255, 245, 235, 0.96)",
+  },
+  {
+    matches: ["arte", "museo", "galeria", "expo", "cultura"],
+    icon: "palette",
+    accent: "linear-gradient(135deg, rgba(14, 165, 233, 0.96), rgba(56, 189, 248, 0.92))",
+    surface: "rgba(236, 248, 255, 0.96)",
+  },
+  {
+    matches: ["deporte", "sports", "futbol", "running", "maraton"],
+    icon: "sports_soccer",
+    accent: "linear-gradient(135deg, rgba(34, 197, 94, 0.96), rgba(22, 163, 74, 0.92))",
+    surface: "rgba(239, 253, 244, 0.96)",
+  },
+  {
+    matches: ["negocio", "tech", "tecnologia", "conferencia", "summit", "cumbre"],
+    icon: "rocket_launch",
+    accent: "linear-gradient(135deg, rgba(59, 130, 246, 0.96), rgba(37, 99, 235, 0.92))",
+    surface: "rgba(239, 246, 255, 0.96)",
+  },
+  {
+    matches: ["familia", "kids", "infantil", "ninos", "comunidad"],
+    icon: "celebration",
+    accent: "linear-gradient(135deg, rgba(236, 72, 153, 0.96), rgba(244, 114, 182, 0.92))",
+    surface: "rgba(253, 242, 248, 0.96)",
+  },
+];
+
+function normalizeTextToken(value = "") {
+  return String(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function slugifyText(value = "") {
+  return normalizeTextToken(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function getHomeInterestVisual(categoryName = "") {
+  const normalizedCategory = normalizeTextToken(categoryName);
+  const matchedVisual = HOME_CATEGORY_VISUALS.find((visual) =>
+    visual.matches.some((candidate) => normalizedCategory.includes(candidate)),
+  );
+
+  return (
+    matchedVisual || {
+      icon: "confirmation_number",
+      accent: "linear-gradient(135deg, rgba(77, 68, 227, 0.96), rgba(124, 58, 237, 0.92))",
+      surface: "rgba(239, 244, 255, 0.96)",
+    }
+  );
+}
 
 function readStoredUser() {
   const rawUser = localStorage.getItem(USER_KEY);
@@ -127,6 +199,41 @@ function buildQueryString(params) {
   return serialized ? `?${serialized}` : "";
 }
 
+function readCatalogFiltersFromSearch(search = "") {
+  const params = new URLSearchParams(search);
+  return {
+    q: params.get("q") || "",
+    category: params.get("category") || "",
+    city: params.get("city") || "",
+    venue: params.get("venue") || "",
+    minPrice: params.get("minPrice") || "",
+    maxPrice: params.get("maxPrice") || "",
+    freeOnly: params.get("freeOnly") === "true",
+  };
+}
+
+function buildCatalogNavigationQuery(filters) {
+  return buildQueryString({
+    q: filters.q,
+    category: filters.category,
+    city: filters.city,
+    venue: filters.venue,
+    minPrice: filters.minPrice,
+    maxPrice: filters.maxPrice,
+    freeOnly: filters.freeOnly ? "true" : "",
+  });
+}
+
+function buildEventsApiQuery(filters) {
+  return buildQueryString({
+    q: filters.q,
+    category: filters.category,
+    city: filters.city,
+    minPrice: filters.minPrice,
+    maxPrice: filters.maxPrice,
+  });
+}
+
 function isServiceUnavailableError(error) {
   if (error?.isConnectionError) {
     return true;
@@ -138,6 +245,16 @@ function isServiceUnavailableError(error) {
     message.includes("timeout exceeded when trying to connect") ||
     message.includes("no pudimos conectar con el servidor")
   );
+}
+
+function getHomeCarouselAutoplayMs() {
+  if (typeof window === "undefined") {
+    return HOME_CAROUSEL_AUTOPLAY_DESKTOP_MS;
+  }
+
+  return window.matchMedia("(max-width: 760px)").matches
+    ? HOME_CAROUSEL_AUTOPLAY_MOBILE_MS
+    : HOME_CAROUSEL_AUTOPLAY_DESKTOP_MS;
 }
 
 function useAutoRefresh(refreshCallback, delay, enabled = true) {
@@ -289,7 +406,7 @@ function getRoleHomePath(role) {
     return "/organizer/events";
   }
 
-  return "/my-space";
+  return "/my-tickets";
 }
 
 function getRoleLabel(role) {
@@ -1233,9 +1350,21 @@ function App() {
       >
         <Route
           path="/my-space"
+          element={<Navigate to="/my-tickets" replace />}
+        />
+        <Route
+          path="/my-tickets"
           element={
             <ProtectedRoute token={token} allowedRoles={["customer", "staff"]} currentUser={currentUser}>
-              <DashboardPage auth={authValue} />
+              <CustomerTicketsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/my-profile"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["customer", "staff"]} currentUser={currentUser}>
+              <CustomerProfilePage auth={authValue} />
             </ProtectedRoute>
           }
         />
@@ -1303,60 +1432,500 @@ function App() {
   );
 }
 
-function PublicLayout({ auth }) {
+function MarketplaceTopbar({ auth, showMemberLink = false }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const isHomeRoute = location.pathname === "/";
-  const isEventsRoute = location.pathname.startsWith("/events");
+  const isCustomerArea = auth.currentUser?.role === "customer" || auth.currentUser?.role === "staff";
+  const [categories, setCategories] = useState([]);
+  const [isDiscoverMenuOpen, setIsDiscoverMenuOpen] = useState(false);
+  const [isSearchPanelOpen, setIsSearchPanelOpen] = useState(false);
+  const [activeFilterModal, setActiveFilterModal] = useState("");
+  const [categorySearchValue, setCategorySearchValue] = useState("");
+  const [searchDraft, setSearchDraft] = useState(() => readCatalogFiltersFromSearch(location.search));
+  const discoverMenuRef = useRef(null);
+  const searchShellRef = useRef(null);
+  const filterModalRef = useRef(null);
+
+  useEffect(() => {
+    setSearchDraft(readCatalogFiltersFromSearch(location.search));
+  }, [location.search]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    apiRequest("/events/categories", { method: "GET" })
+      .then((response) => {
+        if (isMounted) {
+          setCategories(response.data || []);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setCategories([]);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (!discoverMenuRef.current?.contains(event.target)) {
+        setIsDiscoverMenuOpen(false);
+      }
+
+      if (filterModalRef.current?.contains(event.target)) {
+        return;
+      }
+
+      if (event.target.closest(".market-filter-backdrop")) {
+        setActiveFilterModal("");
+        return;
+      }
+
+      if (!searchShellRef.current?.contains(event.target)) {
+        setIsSearchPanelOpen(false);
+        setActiveFilterModal("");
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    document.body.classList.toggle("market-search-open", isSearchPanelOpen);
+    document.body.classList.toggle("market-filter-open", isSearchPanelOpen && Boolean(activeFilterModal));
+
+    return () => {
+      document.body.classList.remove("market-search-open");
+      document.body.classList.remove("market-filter-open");
+    };
+  }, [activeFilterModal, isSearchPanelOpen]);
+
+  const groupedCategories = useMemo(() => {
+    const buckets = [[], [], [], []];
+    categories.forEach((category, index) => {
+      buckets[index % buckets.length].push(category);
+    });
+    return buckets.filter((bucket) => bucket.length);
+  }, [categories]);
+
+  const filteredCategories = useMemo(() => {
+    const query = categorySearchValue.trim().toLowerCase();
+    if (!query) {
+      return categories;
+    }
+
+    return categories.filter((category) => category.name.toLowerCase().includes(query));
+  }, [categories, categorySearchValue]);
+
+  const selectedCategory = categories.find((category) => category.slug === searchDraft.category) || null;
+  const searchPlaceholder = selectedCategory
+    ? `${selectedCategory.name}${searchDraft.q ? ` · ${searchDraft.q}` : ""}`
+    : searchDraft.q || "Buscar por eventos o artistas";
+  const hasPriceFilter = searchDraft.freeOnly || Boolean(searchDraft.minPrice) || Boolean(searchDraft.maxPrice);
+  const activeSearchFilters = useMemo(() => {
+    const items = [];
+
+    if (searchDraft.freeOnly) {
+      items.push({
+        id: "price",
+        label: "Gratis",
+        clear: () => setSearchDraft((prev) => ({ ...prev, freeOnly: false })),
+      });
+    } else if (searchDraft.minPrice || searchDraft.maxPrice) {
+      items.push({
+        id: "price",
+        label: `S/${searchDraft.minPrice || 0} - S/${searchDraft.maxPrice || "..."}`,
+        clear: () => setSearchDraft((prev) => ({ ...prev, minPrice: "", maxPrice: "" })),
+      });
+    }
+
+    if (selectedCategory) {
+      items.push({
+        id: "category",
+        label: selectedCategory.name,
+        clear: () => setSearchDraft((prev) => ({ ...prev, category: "" })),
+      });
+    }
+
+    if (searchDraft.city) {
+      items.push({
+        id: "city",
+        label: searchDraft.city,
+        clear: () => setSearchDraft((prev) => ({ ...prev, city: "" })),
+      });
+    }
+
+    if (searchDraft.venue) {
+      items.push({
+        id: "venue",
+        label: searchDraft.venue,
+        clear: () => setSearchDraft((prev) => ({ ...prev, venue: "" })),
+      });
+    }
+
+    return items;
+  }, [searchDraft, selectedCategory]);
 
   const handleLogout = () => {
     auth.clearSession();
     navigate("/");
   };
 
+  const applySearch = () => {
+    navigate(`/events${buildCatalogNavigationQuery(searchDraft)}`);
+    setIsSearchPanelOpen(false);
+    setActiveFilterModal("");
+  };
+
+  const handleDiscoverCategoryClick = (slug) => {
+    const nextFilters = { ...searchDraft, category: slug };
+    setSearchDraft(nextFilters);
+    navigate(`/events${buildCatalogNavigationQuery(nextFilters)}`);
+    setIsDiscoverMenuOpen(false);
+  };
+
+  const renderFilterModal = () => {
+    if (!activeFilterModal) {
+      return null;
+    }
+
+    if (activeFilterModal === "price") {
+      return (
+        <div className="market-filter-modal" ref={filterModalRef}>
+          <div className="market-filter-modal-header">
+            <h3>Precio</h3>
+            <button className="market-filter-close" type="button" onClick={() => setActiveFilterModal("")}>
+              x
+            </button>
+          </div>
+          <div className="market-filter-pill-row">
+            <button
+              className={`market-filter-pill ${!searchDraft.freeOnly ? "active" : ""}`}
+              type="button"
+              onClick={() => setSearchDraft((prev) => ({ ...prev, freeOnly: false }))}
+            >
+              Rango de precios
+            </button>
+            <button
+              className={`market-filter-pill ${searchDraft.freeOnly ? "active" : ""}`}
+              type="button"
+              onClick={() => setSearchDraft((prev) => ({ ...prev, freeOnly: true, minPrice: "", maxPrice: "" }))}
+            >
+              Eventos gratuitos
+            </button>
+          </div>
+          {!searchDraft.freeOnly ? (
+            <div className="market-filter-range">
+              <input
+                min="0"
+                placeholder="S/. 0.00"
+                type="number"
+                value={searchDraft.minPrice}
+                onChange={(event) => setSearchDraft((prev) => ({ ...prev, minPrice: event.target.value }))}
+              />
+              <input
+                min="0"
+                placeholder="S/. 100.00"
+                type="number"
+                value={searchDraft.maxPrice}
+                onChange={(event) => setSearchDraft((prev) => ({ ...prev, maxPrice: event.target.value }))}
+              />
+            </div>
+          ) : null}
+          <button className="secondary-button market-filter-save" type="button" onClick={() => setActiveFilterModal("")}>
+            Guardar
+          </button>
+        </div>
+      );
+    }
+
+    if (activeFilterModal === "categories") {
+      return (
+        <div className="market-filter-modal" ref={filterModalRef}>
+          <div className="market-filter-modal-header">
+            <h3>Categorias</h3>
+            <button className="market-filter-close" type="button" onClick={() => setActiveFilterModal("")}>
+              x
+            </button>
+          </div>
+          <div className="market-filter-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              placeholder="Buscar categoria"
+              value={categorySearchValue}
+              onChange={(event) => setCategorySearchValue(event.target.value)}
+            />
+          </div>
+          <div className="market-filter-category-list">
+            {filteredCategories.map((category) => (
+              <button
+                className={`market-filter-category-item ${searchDraft.category === category.slug ? "active" : ""}`}
+                key={category.id}
+                type="button"
+                onClick={() => setSearchDraft((prev) => ({ ...prev, category: prev.category === category.slug ? "" : category.slug }))}
+              >
+                <span className="market-filter-checkbox" aria-hidden="true">
+                  {searchDraft.category === category.slug ? "✓" : ""}
+                </span>
+                {category.name}
+              </button>
+            ))}
+          </div>
+          <button className="secondary-button market-filter-save" type="button" onClick={() => setActiveFilterModal("")}>
+            Guardar
+          </button>
+        </div>
+      );
+    }
+
+    if (activeFilterModal === "city") {
+      return (
+        <div className="market-filter-modal compact" ref={filterModalRef}>
+          <div className="market-filter-modal-header">
+            <h3>Ubicacion</h3>
+            <button className="market-filter-close" type="button" onClick={() => setActiveFilterModal("")}>
+              x
+            </button>
+          </div>
+          <input
+            placeholder="Ciudad"
+            value={searchDraft.city}
+            onChange={(event) => setSearchDraft((prev) => ({ ...prev, city: event.target.value }))}
+          />
+          <button className="secondary-button market-filter-save" type="button" onClick={() => setActiveFilterModal("")}>
+            Guardar
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <div className="market-filter-modal compact" ref={filterModalRef}>
+        <div className="market-filter-modal-header">
+          <h3>Local</h3>
+          <button className="market-filter-close" type="button" onClick={() => setActiveFilterModal("")}>
+            x
+          </button>
+        </div>
+        <input
+          placeholder="Nombre del local o venue"
+          value={searchDraft.venue}
+          onChange={(event) => setSearchDraft((prev) => ({ ...prev, venue: event.target.value }))}
+        />
+        <button className="secondary-button market-filter-save" type="button" onClick={() => setActiveFilterModal("")}>
+          Guardar
+        </button>
+      </div>
+    );
+  };
+
   return (
-    <div className="public-shell app-shell">
-      <header className="public-topbar">
-        <div className="public-brand">
+    <>
+      <header className="public-topbar market-topbar">
+        <div className="market-topbar-inner">
+        <div className="market-brand-section" ref={discoverMenuRef}>
           <Link className="brand-mark" to="/">
             CrowdPass
           </Link>
-          <nav className="nav-links">
-            <Link className={isHomeRoute ? "active" : ""} to="/">
-              Inicio
+          <button
+            className={`market-discover-trigger ${isDiscoverMenuOpen || location.pathname.startsWith("/events") ? "active" : ""}`}
+            type="button"
+            onClick={() => {
+              setIsDiscoverMenuOpen((current) => !current);
+              setIsSearchPanelOpen(false);
+            }}
+          >
+            Descubrir
+            <span aria-hidden="true">{isDiscoverMenuOpen ? "⌃" : "⌄"}</span>
+          </button>
+          {showMemberLink ? (
+            <Link className={location.pathname === "/my-tickets" ? "market-member-link active" : "market-member-link"} to="/my-tickets">
+              Mis entradas
             </Link>
-            <Link className={isEventsRoute ? "active" : ""} to="/events">
-              Eventos
-            </Link>
-          </nav>
+          ) : null}
+
+          {isDiscoverMenuOpen ? (
+            <div className="market-discover-menu">
+              <button className="market-discover-all" type="button" onClick={() => navigate("/events")}>
+                Ver todas las categorias
+              </button>
+              <div className="market-discover-grid">
+                {groupedCategories.map((bucket, columnIndex) => (
+                  <div className="market-discover-column" key={`discover-column-${columnIndex}`}>
+                    {bucket.map((category) => (
+                      <button
+                        className="market-discover-item"
+                        key={category.id}
+                        type="button"
+                        onClick={() => handleDiscoverCategoryClick(category.slug)}
+                      >
+                        <span>{category.name}</span>
+                        <span aria-hidden="true">›</span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        <div className="public-actions">
-          {auth.token ? (
-            <>
-              <Link className="secondary-button" to={getRoleHomePath(auth.currentUser?.role)}>
-                {auth.currentUser?.role === "admin"
-                  ? "Panel"
-                  : auth.currentUser?.role === "organizer"
-                    ? "Mis eventos"
-                    : "Mi espacio"}
-              </Link>
-              <button className="ghost-button" type="button" onClick={handleLogout}>
-                Cerrar sesion
-              </button>
-            </>
-          ) : (
-            <>
-              <Link className={location.pathname === "/login" ? "active subtle-link" : "subtle-link"} to="/login">
-                Iniciar sesion
-              </Link>
-              <Link className="primary-button" to="/register">
-                Crear cuenta
-              </Link>
-            </>
-          )}
+        <div className="market-search-shell" ref={searchShellRef}>
+          <div className={`market-search-input-shell ${isSearchPanelOpen ? "active" : ""}`}>
+            <span className="market-search-icon" aria-hidden="true">
+              ⌕
+            </span>
+            <input
+              className="market-search-navbar-input"
+              placeholder="Buscar por eventos o artistas"
+              value={searchDraft.q}
+              onFocus={() => {
+                setIsSearchPanelOpen(true);
+                setIsDiscoverMenuOpen(false);
+              }}
+              onChange={(event) => {
+                setSearchDraft((prev) => ({ ...prev, q: event.target.value }));
+                setIsSearchPanelOpen(true);
+                setIsDiscoverMenuOpen(false);
+              }}
+            />
+            <button
+              aria-label={searchDraft.q ? "Limpiar busqueda" : "Cerrar buscador"}
+              className="market-search-clear"
+              type="button"
+              onClick={() => {
+                if (searchDraft.q) {
+                  setSearchDraft((prev) => ({ ...prev, q: "" }));
+                  return;
+                }
+
+                setIsSearchPanelOpen(false);
+                setActiveFilterModal("");
+              }}
+            >
+              x
+            </button>
+          </div>
+
+          {isSearchPanelOpen ? (
+            <div className="market-search-dropdown">
+              <div className="market-search-dropdown-inner">
+                <div className="market-search-panel">
+                  <div className="market-filter-chip-row">
+                    <button
+                      className={`market-filter-chip ${activeFilterModal === "price" || hasPriceFilter ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setActiveFilterModal("price")}
+                    >
+                      Precio
+                    </button>
+                    <button
+                      className={`market-filter-chip ${activeFilterModal === "categories" || selectedCategory ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setActiveFilterModal("categories")}
+                    >
+                      Categorias
+                    </button>
+                    <button
+                      className={`market-filter-chip ${activeFilterModal === "city" || searchDraft.city ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setActiveFilterModal("city")}
+                    >
+                      Ubicacion
+                    </button>
+                    <button
+                      className={`market-filter-chip ${activeFilterModal === "venue" || searchDraft.venue ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setActiveFilterModal("venue")}
+                    >
+                      Local
+                    </button>
+                  </div>
+                  {activeSearchFilters.length ? (
+                    <div className="market-search-selected-filters">
+                      {activeSearchFilters.map((filterItem) => (
+                        <button
+                          className="market-search-selected-chip"
+                          key={filterItem.id}
+                          type="button"
+                          onClick={filterItem.clear}
+                        >
+                          <span>{filterItem.label}</span>
+                          <span aria-hidden="true">x</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="market-search-actions">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => {
+                        setIsSearchPanelOpen(false);
+                        setActiveFilterModal("");
+                      }}
+                    >
+                      Cancelar
+                    </button>
+                    <button className="primary-button market-search-submit" type="button" onClick={applySearch}>
+                      Buscar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+          <div className="market-topbar-actions">
+            {auth.token ? (
+              <>
+                {isCustomerArea ? (
+                  <Link
+                    aria-label="Mi perfil"
+                    className={`navbar-avatar-button ${location.pathname === "/my-profile" ? "active" : ""}`}
+                    to="/my-profile"
+                  >
+                    <img src={CUSTOMER_AVATAR_IMAGE} alt="Mi perfil" />
+                  </Link>
+                ) : (
+                  <Link className="subtle-link" to={getRoleHomePath(auth.currentUser?.role)}>
+                    {auth.currentUser?.role === "admin" ? "Panel" : "Mis eventos"}
+                  </Link>
+                )}
+                <button className="ghost-button" type="button" onClick={handleLogout}>
+                  Cerrar sesion
+                </button>
+              </>
+            ) : (
+              <>
+                <Link className="subtle-link" to="/register">
+                  Registrarse
+                </Link>
+                <Link className="ghost-button" to="/login">
+                  Iniciar sesion
+                </Link>
+              </>
+            )}
+          </div>
         </div>
       </header>
+
+      {activeFilterModal ? <div className="market-filter-backdrop" /> : null}
+      {renderFilterModal()}
+    </>
+  );
+}
+
+function PublicLayout({ auth }) {
+  return (
+    <div className="public-shell app-shell marketplace-shell">
+      <MarketplaceTopbar auth={auth} />
 
       <main className="page-content">
         <Outlet />
@@ -1365,7 +1934,7 @@ function PublicLayout({ auth }) {
       <footer className="public-footer">
         <p>© 2026 CrowdPass. Plataforma para descubrir, publicar y reservar experiencias.</p>
         <div className="public-footer-links">
-          <Link to="/events">Catalogo</Link>
+          <Link to="/events">Descubrir</Link>
           <Link to="/terms">Terminos y condiciones</Link>
           <span>Soporte</span>
         </div>
@@ -1375,82 +1944,11 @@ function PublicLayout({ auth }) {
 }
 
 function MemberLayout({ auth }) {
-  const location = useLocation();
-  const navigate = useNavigate();
-  const role = auth.currentUser?.role;
-  const navItems =
-    role === "organizer"
-      ? [
-          { label: "Mis eventos", path: "/organizer/events" },
-          { label: "Catalogo", path: "/events" },
-          { label: "Terminos", path: "/terms" },
-        ]
-      : [
-          { label: "Mi espacio", path: "/my-space" },
-          { label: "Catalogo", path: "/events" },
-          { label: "Terminos", path: "/terms" },
-        ];
-
-  const titleMap = {
-    organizer: "Espacio de organizador",
-    staff: "Mi espacio",
-    customer: "Mi espacio",
-  };
-
-  const subtitleMap = {
-    organizer: "Organiza tus publicaciones, actualiza tus fechas y prepara tus proximos eventos.",
-    staff: "Consulta tu espacio personal y mantente al tanto de tu actividad dentro de CrowdPass.",
-    customer: "Revisa tus entradas, actualiza tu perfil y gestiona tu cuenta de forma simple.",
-  };
-
-  const handleLogout = () => {
-    auth.clearSession();
-    navigate("/");
-  };
-
   return (
-    <div className="public-shell app-shell member-shell">
-      <header className="public-topbar member-topbar">
-        <div className="public-brand">
-          <Link className="brand-mark" to="/">
-            CrowdPass
-          </Link>
-          <nav className="nav-links member-nav">
-            {navItems.map((item) => (
-              <Link className={location.pathname === item.path ? "active" : ""} key={item.path} to={item.path}>
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-        </div>
-
-        <div className="public-actions">
-          <Link className="secondary-button" to={getRoleHomePath(role)}>
-            {role === "organizer" ? "Mi espacio" : "Resumen"}
-          </Link>
-          <button className="ghost-button" type="button" onClick={handleLogout}>
-            Cerrar sesion
-          </button>
-        </div>
-      </header>
+    <div className="public-shell app-shell marketplace-shell member-shell">
+      <MarketplaceTopbar auth={auth} showMemberLink />
 
       <main className="page-content">
-        <section className="card member-header-card">
-          <div>
-            <p className="eyebrow">CrowdPass</p>
-            <h1>{titleMap[role] || "Tu espacio"}</h1>
-            <p className="muted">{subtitleMap[role] || "Continua gestionando tu experiencia."}</p>
-          </div>
-
-          <div className="member-profile-card">
-            <img src={CUSTOMER_AVATAR_IMAGE} alt="Perfil" />
-            <div>
-              <strong>{auth.currentUser?.full_name || auth.currentUser?.email}</strong>
-              <span>{getRoleLabel(role)}</span>
-            </div>
-          </div>
-        </section>
-
         <section className="dashboard-content">
           <Outlet />
         </section>
@@ -1583,6 +2081,9 @@ function HomePage({ auth }) {
   const [categories, setCategories] = useState([]);
   const [feedback, setFeedback] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [activeSlideIndex, setActiveSlideIndex] = useState(0);
+  const [isCarouselPaused, setIsCarouselPaused] = useState(false);
+  const [carouselAutoplayMs, setCarouselAutoplayMs] = useState(() => getHomeCarouselAutoplayMs());
 
   const loadHomeData = useCallback(async () => {
     setIsLoading(true);
@@ -1590,7 +2091,7 @@ function HomePage({ auth }) {
     try {
       const [eventsResponse, categoriesResponse] = await Promise.all([
         apiRequest("/events", { method: "GET" }),
-        apiRequest("/events/categories", { method: "GET" }),
+        apiRequest("/events/categories", { method: "GET" }).catch(() => ({ data: [] })),
       ]);
 
       setEvents(eventsResponse.data || []);
@@ -1613,84 +2114,361 @@ function HomePage({ auth }) {
     loadHomeData();
   }, [loadHomeData]);
 
-  const upcomingEvents = events.slice(0, 6);
-  const activeCategories = categories.slice(0, 5);
+  const upcomingEvents = useMemo(() => {
+    return [...events]
+      .sort((left, right) => {
+        const leftDate = left.starts_at ? new Date(left.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+        const rightDate = right.starts_at ? new Date(right.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+        return leftDate - rightDate;
+      })
+      .slice(0, 6);
+  }, [events]);
+  const discoverEvents = useMemo(() => {
+    return [...events]
+      .sort((left, right) => {
+        const leftDate = left.starts_at ? new Date(left.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+        const rightDate = right.starts_at ? new Date(right.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+        return leftDate - rightDate;
+      })
+      .slice(0, 6);
+  }, [events]);
+  const categoryEventCounts = useMemo(() => {
+    return events.reduce((accumulator, eventItem) => {
+      const categoryKey = eventItem.category_slug || slugifyText(eventItem.category_name || "");
+
+      if (!categoryKey) {
+        return accumulator;
+      }
+
+      accumulator[categoryKey] = (accumulator[categoryKey] || 0) + 1;
+      return accumulator;
+    }, {});
+  }, [events]);
+  const interestCategories = useMemo(() => {
+    const fallbackCategories = Array.from(
+      new Map(
+        events
+          .filter((eventItem) => eventItem.category_name)
+          .map((eventItem) => [
+            eventItem.category_slug || slugifyText(eventItem.category_name),
+            {
+              slug: eventItem.category_slug || slugifyText(eventItem.category_name),
+              name: eventItem.category_name,
+            },
+          ]),
+      ).values(),
+    );
+    const sourceCategories = categories.length ? categories : fallbackCategories;
+
+    return sourceCategories.slice(0, 8).map((category) => {
+      const fallbackSlug = slugifyText(category.name || category.slug || "");
+      const categorySlug = category.slug || fallbackSlug;
+      const visual = getHomeInterestVisual(category.name || categorySlug);
+
+      return {
+        ...category,
+        slug: categorySlug,
+        icon: visual.icon,
+        accent: visual.accent,
+        surface: visual.surface,
+        totalEvents: categoryEventCounts[categorySlug] || 0,
+      };
+    });
+  }, [categories, categoryEventCounts, events]);
+  const featuredEvent = upcomingEvents[activeSlideIndex] || null;
+  const sidebarSpotlightEvents = useMemo(() => upcomingEvents.slice(1, 4), [upcomingEvents]);
+  const sidebarInterestPreview = useMemo(() => interestCategories.slice(0, 4), [interestCategories]);
+
+  useEffect(() => {
+    if (!upcomingEvents.length) {
+      setActiveSlideIndex(0);
+      return;
+    }
+
+    setActiveSlideIndex((currentIndex) => (currentIndex >= upcomingEvents.length ? 0 : currentIndex));
+  }, [upcomingEvents]);
+
+  useEffect(() => {
+    const syncCarouselAutoplay = () => {
+      setCarouselAutoplayMs(getHomeCarouselAutoplayMs());
+    };
+
+    syncCarouselAutoplay();
+    window.addEventListener("resize", syncCarouselAutoplay);
+
+    return () => window.removeEventListener("resize", syncCarouselAutoplay);
+  }, []);
+
+  useEffect(() => {
+    if (isCarouselPaused || upcomingEvents.length <= 1) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setActiveSlideIndex((currentIndex) => (currentIndex + 1) % upcomingEvents.length);
+    }, carouselAutoplayMs);
+
+    return () => window.clearInterval(intervalId);
+  }, [carouselAutoplayMs, isCarouselPaused, upcomingEvents.length]);
+
+  const goToPreviousSlide = () => {
+    setActiveSlideIndex((currentIndex) => {
+      if (!upcomingEvents.length) {
+        return 0;
+      }
+
+      return currentIndex === 0 ? upcomingEvents.length - 1 : currentIndex - 1;
+    });
+  };
+
+  const goToNextSlide = () => {
+    setActiveSlideIndex((currentIndex) => {
+      if (!upcomingEvents.length) {
+        return 0;
+      }
+
+      return currentIndex === upcomingEvents.length - 1 ? 0 : currentIndex + 1;
+    });
+  };
 
   return (
     <section className="page-section home-page">
       {feedback ? <InlineMessage type="error" message={feedback} /> : null}
 
-      <section className="card home-intro-card">
-        <div>
-          <p className="eyebrow">Descubre</p>
-          <h1>Proximos eventos</h1>
-          <p className="muted">
-            Explora experiencias publicadas, entra al detalle del evento y comienza tu reserva cuando estes listo.
-          </p>
-        </div>
-        <div className="cta-row">
-          <Link className="primary-button" to="/events">
-            Ver todos
-          </Link>
-          <Link className="secondary-button" to={auth.currentUser ? getRoleHomePath(auth.currentUser.role) : "/login"}>
-            {auth.currentUser ? "Ir a mi cuenta" : "Iniciar sesion"}
-          </Link>
-        </div>
-      </section>
+      <div className="home-page-layout">
+        <div className="home-main-column">
+          <section className="page-section home-hero-section">
+            {isLoading ? <p className="muted">Cargando portada del catalogo...</p> : null}
 
-      <section className="page-section">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Agenda</p>
-            <h2>Eventos publicados para reservar</h2>
-          </div>
-        </div>
-
-        {isLoading ? <p className="muted">Cargando portada del catalogo...</p> : null}
-
-        {!isLoading && upcomingEvents.length === 0 ? (
-          <div className="empty-state card compact-state">
-            <h3>No hay eventos publicados todavia</h3>
-            <p className="muted">Cuando existan eventos en estado publicado, apareceran aqui en el inicio.</p>
-          </div>
-        ) : null}
-
-        <div className="event-tile-grid">
-          {upcomingEvents.map((eventItem, index) => (
-            <Link className="event-tile-card" key={eventItem.id} to={`/events/${eventItem.id}`}>
-              <div className="event-tile-media">
-                <img
-                  src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]}
-                  alt={eventItem.title}
-                />
+            {!isLoading && upcomingEvents.length === 0 ? (
+              <div className="empty-state card compact-state">
+                <h3>No hay eventos publicados todavia</h3>
+                <p className="muted">Cuando existan eventos en estado publicado, apareceran aqui en el inicio.</p>
               </div>
-              <div className="event-tile-copy">
-                <span className="event-tile-category">{eventItem.category_name || "Evento"}</span>
-                <h3>{eventItem.title}</h3>
-                <p>{formatCompactDate(eventItem.starts_at)}</p>
-                <strong>{eventItem.city || "Peru"}</strong>
+            ) : null}
+
+            {featuredEvent ? (
+              <div
+                className="home-carousel-shell"
+                onMouseEnter={() => setIsCarouselPaused(true)}
+                onMouseLeave={() => setIsCarouselPaused(false)}
+                style={{ "--home-carousel-duration": `${carouselAutoplayMs}ms` }}
+              >
+                <article className="home-carousel-card card">
+                  <div className="home-carousel-media">
+                    <div className="home-carousel-slides">
+                      {upcomingEvents.map((eventItem, index) => (
+                        <div
+                          className={`home-carousel-slide ${index === activeSlideIndex ? "active" : ""}`}
+                          key={eventItem.id}
+                          style={{
+                            transform: `translate3d(${(index - activeSlideIndex) * 100}%, 0, 0)`,
+                            zIndex: index === activeSlideIndex ? 2 : 1,
+                          }}
+                        >
+                          <Link
+                            aria-label={`Ver evento ${eventItem.title}`}
+                            className="home-carousel-slide-link"
+                            to={`/events/${eventItem.id}`}
+                          >
+                            <img
+                              className={`home-carousel-image ${index === activeSlideIndex ? "active" : ""}`}
+                              src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]}
+                              alt={eventItem.title}
+                            />
+                            <div className="home-carousel-copy">
+                              <p className="eyebrow">Proximos eventos</p>
+                              <span className="event-tile-category">{eventItem.category_name || "Evento"}</span>
+                              <h3>{eventItem.title}</h3>
+                              <div className="home-carousel-meta">
+                                <span>{formatCompactDate(eventItem.starts_at)}</span>
+                                <span>{eventItem.city || "Peru"}</span>
+                                <span>{eventItem.venue || "Venue por confirmar"}</span>
+                              </div>
+                            </div>
+                          </Link>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      aria-label="Evento anterior"
+                      className="home-carousel-control previous"
+                      type="button"
+                      onClick={goToPreviousSlide}
+                    >
+                      <span className="home-carousel-control-icon" aria-hidden="true">
+                        {"<"}
+                      </span>
+                    </button>
+                    <button
+                      aria-label="Evento siguiente"
+                      className="home-carousel-control next"
+                      type="button"
+                      onClick={goToNextSlide}
+                    >
+                      <span className="home-carousel-control-icon" aria-hidden="true">
+                        {">"}
+                      </span>
+                    </button>
+                  </div>
+                </article>
+
+                <div className="home-carousel-track">
+                  {upcomingEvents.map((eventItem, index) => (
+                    <button
+                      className={`home-carousel-thumb ${index === activeSlideIndex ? "active" : ""}`}
+                      key={eventItem.id}
+                      type="button"
+                      onClick={() => setActiveSlideIndex(index)}
+                    >
+                      <img
+                        src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]}
+                        alt={eventItem.title}
+                      />
+                      <div>
+                        <span>{formatCompactDate(eventItem.starts_at)}</span>
+                        <strong>{eventItem.title}</strong>
+                      </div>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </Link>
-          ))}
-        </div>
-      </section>
+            ) : null}
+          </section>
 
-      <section className="page-section">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Explora</p>
-            <h2>Tambien puedes buscar por categoria</h2>
+          <section className="page-section home-discovery-section">
+            <div className="card home-discovery-main">
+              <div className="home-discovery-header">
+                <div>
+                  <p className="eyebrow">Descubrir</p>
+                  <h2>Descubre tus intereses</h2>
+                  <p className="muted">
+                    Explora categorias reales del catalogo y entra rapido a eventos alineados con lo que quieres ver.
+                  </p>
+                </div>
+              </div>
+
+              {interestCategories.length ? (
+                <div className="home-interest-grid">
+                  {interestCategories.map((category) => (
+                    <Link
+                      className="home-interest-card"
+                      key={category.slug || category.name}
+                      to={`/events${buildCatalogNavigationQuery({ category: category.slug })}`}
+                      style={{
+                        "--home-interest-accent": category.accent,
+                        "--home-interest-surface": category.surface,
+                      }}
+                    >
+                      <span className="home-interest-icon" aria-hidden="true">
+                        <span className="material-symbols-outlined">{category.icon}</span>
+                      </span>
+                      <div className="home-interest-copy">
+                        <strong>{category.name}</strong>
+                        <span>
+                          {category.totalEvents
+                            ? `${category.totalEvents} evento${category.totalEvents === 1 ? "" : "s"} disponibles`
+                            : "Explora esta categoria"}
+                        </span>
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">Las categorias apareceran aqui cuando tengamos eventos publicados en el catalogo.</p>
+              )}
+
+              <div className="home-discovery-divider" />
+
+              <div className="home-discovery-events-head">
+                <div>
+                  <p className="eyebrow">Seleccion rapida</p>
+                  <h3>Eventos que van contigo</h3>
+                  <p className="muted">
+                    Esta grilla queda fija a 3 cards por ancho en desktop para que la seccion debajo del carrusel se vea mas ordenada.
+                  </p>
+                </div>
+              </div>
+
+              <div className="event-tile-grid home-featured-grid">
+                {discoverEvents.map((eventItem, index) => (
+                  <Link className="event-tile-card home-event-card" key={eventItem.id} to={`/events/${eventItem.id}`}>
+                    <div className="event-tile-media">
+                      <img
+                        src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]}
+                        alt={eventItem.title}
+                      />
+                    </div>
+                    <div className="event-tile-copy">
+                      <span className="event-tile-category">{eventItem.category_name || "Evento"}</span>
+                      <h3>{eventItem.title}</h3>
+                      <p>{formatCompactDate(eventItem.starts_at || eventItem.event_date)}</p>
+                      <strong>{eventItem.city || "Peru"}</strong>
+                      <small>{eventItem.venue}</small>
+                      <span className="event-tile-price">Desde {formatCurrency(eventItem.price)}</span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <aside className="home-sidebar-column">
+          <div className="home-sidebar-stack">
+            <div className="card home-sidebar-card home-sidebar-media-card">
+              <span className="home-side-mock-badge">Mock lateral</span>
+              <div className="home-sidebar-card-copy">
+                <h3>Promociones y vitrinas del lateral</h3>
+                <p className="muted">Esta columna ahora nace al lado del carrusel y acompana todo el home como un sidebar continuo.</p>
+              </div>
+
+              <div className="home-sidebar-media-list">
+                {sidebarSpotlightEvents.map((eventItem, index) => (
+                  <Link className="home-sidebar-media-item" key={eventItem.id} to={`/events/${eventItem.id}`}>
+                    <img
+                      src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[(index + 1) % EVENT_FALLBACK_IMAGES.length]}
+                      alt={eventItem.title}
+                    />
+                    <div className="home-sidebar-media-overlay">
+                      <strong>{eventItem.title}</strong>
+                      <span>{eventItem.category_name || "Evento"}</span>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            </div>
+
+            <div className="card home-sidebar-card home-sidebar-cta-card">
+              <span className="home-sidebar-kicker">Organizadores</span>
+              <h3>Te ayudamos a crear y vender tu evento</h3>
+              <p className="muted">Sidebar mock listo para banners comerciales, captacion de organizadores y bloques promocionales persistentes.</p>
+              <Link className="primary-button full-width-button" to="/register">
+                Contactanos
+              </Link>
+            </div>
+
+            <div className="card home-sidebar-card home-sidebar-interest-card">
+              <span className="home-sidebar-kicker">Tendencias</span>
+              <h3>Categorias en foco</h3>
+              <div className="home-sidebar-interest-list">
+                {sidebarInterestPreview.map((category) => (
+                  <Link
+                    className="home-sidebar-interest-chip"
+                    key={category.slug || category.name}
+                    to={`/events${buildCatalogNavigationQuery({ category: category.slug })}`}
+                  >
+                    <span className="material-symbols-outlined" aria-hidden="true">
+                      {category.icon}
+                    </span>
+                    <strong>{category.name}</strong>
+                  </Link>
+                ))}
+              </div>
+            </div>
           </div>
-        </div>
-
-        <div className="home-category-strip">
-          {activeCategories.map((item) => (
-            <Link className="secondary-button" key={item.id || item.slug} to={`/events${buildQueryString({ category: item.slug })}`}>
-              {item.name}
-            </Link>
-          ))}
-        </div>
-      </section>
+        </aside>
+      </div>
     </section>
   );
 }
@@ -1715,10 +2493,50 @@ function RegisterPage({ auth }) {
   const [feedback, setFeedback] = useState({ type: "", message: "" });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+  const [isPasswordFocused, setIsPasswordFocused] = useState(false);
+  const [isConfirmPasswordFocused, setIsConfirmPasswordFocused] = useState(false);
+  const [availabilityFeedback, setAvailabilityFeedback] = useState({
+    email: { tone: "", message: "" },
+    documentNumber: { tone: "", message: "" },
+    phone: { tone: "", message: "" },
+  });
+  const availabilityRequestSequence = useRef({
+    email: 0,
+    documentNumber: 0,
+    phone: 0,
+  });
   const passwordRuleStates = useMemo(() => getPasswordRuleStates(formData.password), [formData.password]);
   const passwordStrength = useMemo(() => getPasswordStrengthMeta(formData.password), [formData.password]);
+  const hasPassword = formData.password.trim().length > 0;
   const hasConfirmPassword = formData.confirmPassword.trim().length > 0;
   const passwordsMatch = formData.password === formData.confirmPassword;
+  const shouldShowPasswordAssistant = (isPasswordFocused || hasPassword) && !(hasConfirmPassword && passwordsMatch);
+  const shouldShowConfirmPasswordHint = isConfirmPasswordFocused || hasConfirmPassword;
+  const isRegisterFormComplete = useMemo(() => {
+    const requiredTextFields = [
+      formData.fullName,
+      formData.email,
+      formData.password,
+      formData.confirmPassword,
+      formData.country,
+      formData.city,
+      formData.documentNumber,
+      formData.phone,
+    ];
+
+    const hasAllRequiredTextFields = requiredTextFields.every((value) => String(value || "").trim().length > 0);
+    const hasValidGender = Boolean(formData.gender);
+    const hasValidPassword = passwordRuleStates.every((rule) => rule.isMet);
+
+    return (
+      hasAllRequiredTextFields &&
+      hasValidGender &&
+      hasValidPassword &&
+      passwordsMatch &&
+      formData.acceptsTerms &&
+      formData.acceptsMarketing
+    );
+  }, [formData, passwordRuleStates, passwordsMatch]);
 
   const handleChange = (event) => {
     const { name, value, checked, type } = event.target;
@@ -1726,6 +2544,87 @@ function RegisterPage({ auth }) {
       ...prev,
       [name]: type === "checkbox" ? checked : value,
     }));
+
+    if (name === "email" || name === "documentNumber" || name === "phone") {
+      availabilityRequestSequence.current[name] += 1;
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        [name]: { tone: "", message: "" },
+      }));
+    }
+  };
+
+  const handleAvailabilityBlur = async (fieldName) => {
+    const rawValue = formData[fieldName];
+    const value = String(rawValue || "").trim();
+
+    if (!value) {
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        [fieldName]: { tone: "", message: "" },
+      }));
+      return;
+    }
+
+    if (fieldName === "email" && !value.includes("@")) {
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        email: { tone: "error", message: "Ingresa un correo valido para poder verificarlo." },
+      }));
+      return;
+    }
+
+    if (fieldName === "documentNumber" && !REGISTER_DOCUMENT_REGEX.test(value)) {
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        documentNumber: { tone: "error", message: "El documento debe tener entre 8 y 20 caracteres alfanumericos." },
+      }));
+      return;
+    }
+
+    if (fieldName === "phone" && !REGISTER_PHONE_REGEX.test(value)) {
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        phone: { tone: "error", message: "El telefono debe incluir prefijo internacional, por ejemplo +51999999999." },
+      }));
+      return;
+    }
+
+    const nextRequestId = availabilityRequestSequence.current[fieldName] + 1;
+    availabilityRequestSequence.current[fieldName] = nextRequestId;
+
+    setAvailabilityFeedback((prev) => ({
+      ...prev,
+      [fieldName]: { tone: "checking", message: "Validando disponibilidad..." },
+    }));
+
+    try {
+      const response = await apiRequest("/auth/check-availability", {
+        method: "POST",
+        body: JSON.stringify({ [fieldName]: value }),
+      });
+
+      if (availabilityRequestSequence.current[fieldName] !== nextRequestId) {
+        return;
+      }
+
+      const fieldResult = response?.data?.[fieldName];
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        [fieldName]: fieldResult?.available
+          ? { tone: "success", message: "Disponible." }
+          : { tone: "error", message: fieldResult?.message || "Ya existe un usuario con este dato." },
+      }));
+    } catch (error) {
+      if (availabilityRequestSequence.current[fieldName] !== nextRequestId) {
+        return;
+      }
+
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        [fieldName]: { tone: "error", message: getUserFacingErrorMessage(error, "No pudimos validar este dato.") },
+      }));
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -1774,7 +2673,7 @@ function RegisterPage({ auth }) {
 
       auth.saveSession(response.data.token, response.data.user);
       await auth.checkServer();
-      navigate(returnTo || getRoleHomePath(response.data.user.role), { replace: true });
+      navigate(returnTo || "/", { replace: true });
     } catch (error) {
       setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos crear tu cuenta en este momento.") });
     } finally {
@@ -1795,7 +2694,18 @@ function RegisterPage({ auth }) {
         </label>
         <label>
           Correo
-          <input name="email" type="email" value={formData.email} onChange={handleChange} required />
+          <input
+            name="email"
+            type="email"
+            value={formData.email}
+            onChange={handleChange}
+            onBlur={() => handleAvailabilityBlur("email")}
+            autoComplete="email"
+            required
+          />
+          {availabilityFeedback.email.message ? (
+            <span className={`field-assist-message ${availabilityFeedback.email.tone}`}>{availabilityFeedback.email.message}</span>
+          ) : null}
         </label>
         <label>
           Contrasena
@@ -1806,7 +2716,9 @@ function RegisterPage({ auth }) {
               value={formData.password}
               onChange={handleChange}
               autoComplete="new-password"
-              aria-describedby="password-help password-rules"
+              aria-describedby="password-help"
+              onFocus={() => setIsPasswordFocused(true)}
+              onBlur={() => setIsPasswordFocused(false)}
               required
             />
             <button
@@ -1821,22 +2733,17 @@ function RegisterPage({ auth }) {
               </span>
             </button>
           </div>
-          <span className="password-help-text" id="password-help">
-            Usa una contrasena segura como en formularios modernos: combina letras, numeros y simbolos.
-          </span>
-          <div className="password-strength" aria-live="polite">
-            <div className={`password-strength-bar ${passwordStrength.tone}`} style={{ width: `${passwordStrength.progress}%` }} />
-          </div>
-          <span className="password-strength-label">Seguridad: {passwordStrength.label}</span>
-          <div className="password-checklist" id="password-rules">
-            {passwordRuleStates.map((rule) => (
-              <span key={rule.id} className={`password-check ${rule.isMet ? "met" : ""}`}>
-                <span className="material-symbols-outlined" aria-hidden="true">
-                  {rule.isMet ? "check_circle" : "radio_button_unchecked"}
-                </span>
-                {rule.label}
-              </span>
-            ))}
+          <div className={`password-assistant-dropdown ${shouldShowPasswordAssistant ? "visible" : ""}`} id="password-help">
+            <div className="password-assistant-dropdown-content">
+                <span className="password-help-text">Usa 8+ caracteres, mayuscula, minuscula, numero y simbolo.</span>
+                <div className="password-strength-inline">
+                  <span className="password-strength-label">Seguridad</span>
+                  <span className={`password-strength-status ${passwordStrength.tone}`}>{passwordStrength.label}</span>
+                </div>
+                <div className="password-strength compact" aria-live="polite">
+                  <div className={`password-strength-bar ${passwordStrength.tone}`} style={{ width: `${passwordStrength.progress}%` }} />
+                </div>
+            </div>
           </div>
         </label>
         <label>
@@ -1849,6 +2756,8 @@ function RegisterPage({ auth }) {
               onChange={handleChange}
               autoComplete="new-password"
               aria-describedby="confirm-password-status"
+              onFocus={() => setIsConfirmPasswordFocused(true)}
+              onBlur={() => setIsConfirmPasswordFocused(false)}
               required
             />
             <button
@@ -1863,13 +2772,18 @@ function RegisterPage({ auth }) {
               </span>
             </button>
           </div>
-          <span className={`confirm-password-message ${hasConfirmPassword ? (passwordsMatch ? "match" : "mismatch") : ""}`} id="confirm-password-status">
-            {!hasConfirmPassword
-              ? "Vuelve a escribir tu contrasena para confirmar que no hay errores."
-              : passwordsMatch
-                ? "Las contrasenas coinciden."
-                : "Las contrasenas no coinciden."}
-          </span>
+          {shouldShowConfirmPasswordHint ? (
+            <span
+              className={`confirm-password-message ${hasConfirmPassword ? (passwordsMatch ? "match" : "mismatch") : ""}`}
+              id="confirm-password-status"
+            >
+              {!hasConfirmPassword
+                ? "Vuelve a escribir tu contrasena para confirmar que no hay errores."
+                : passwordsMatch
+                  ? "Las contrasenas coinciden."
+                  : "Las contrasenas no coinciden."}
+            </span>
+          ) : null}
         </label>
         <label>
           Pais
@@ -1881,7 +2795,18 @@ function RegisterPage({ auth }) {
         </label>
         <label>
           Documento / DNI
-          <input name="documentNumber" value={formData.documentNumber} onChange={handleChange} required />
+          <input
+            name="documentNumber"
+            value={formData.documentNumber}
+            onChange={handleChange}
+            onBlur={() => handleAvailabilityBlur("documentNumber")}
+            required
+          />
+          {availabilityFeedback.documentNumber.message ? (
+            <span className={`field-assist-message ${availabilityFeedback.documentNumber.tone}`}>
+              {availabilityFeedback.documentNumber.message}
+            </span>
+          ) : null}
         </label>
         <label>
           Genero
@@ -1895,7 +2820,10 @@ function RegisterPage({ auth }) {
         </label>
         <label>
           Telefono con prefijo
-          <input name="phone" value={formData.phone} onChange={handleChange} required />
+          <input name="phone" value={formData.phone} onChange={handleChange} onBlur={() => handleAvailabilityBlur("phone")} required />
+          {availabilityFeedback.phone.message ? (
+            <span className={`field-assist-message ${availabilityFeedback.phone.tone}`}>{availabilityFeedback.phone.message}</span>
+          ) : null}
         </label>
         <label className="checkbox-field form-span-2">
           <input name="acceptsTerms" type="checkbox" checked={formData.acceptsTerms} onChange={handleChange} />
@@ -1907,7 +2835,7 @@ function RegisterPage({ auth }) {
           <input name="acceptsMarketing" type="checkbox" checked={formData.acceptsMarketing} onChange={handleChange} />
           <span>Deseo recibir novedades comerciales y promociones.</span>
         </label>
-        <button className="primary-button" type="submit" disabled={isSubmitting}>
+        <button className="primary-button" type="submit" disabled={isSubmitting || !isRegisterFormComplete}>
           {isSubmitting ? "Registrando..." : "Registrarme"}
         </button>
       </form>
@@ -1937,7 +2865,7 @@ function LoginPage({ auth }) {
 
       auth.saveSession(response.data.token, response.data.user);
       await auth.checkServer();
-      navigate(returnTo || getRoleHomePath(response.data.user.role), { replace: true });
+      navigate(returnTo || "/", { replace: true });
     } catch (error) {
       setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos iniciar sesion en este momento.") });
     } finally {
@@ -1992,12 +2920,26 @@ function LoginPage({ auth }) {
 }
 
 function EventsPage({ auth }) {
+  const location = useLocation();
+  const [currentPage, setCurrentPage] = useState(1);
+  const [timeFilter, setTimeFilter] = useState("all");
+  const [sortOrder, setSortOrder] = useState("upcoming");
   const [events, setEvents] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [filters, setFilters] = useState({ q: "", category: "", city: "", minPrice: "", maxPrice: "" });
   const [feedback, setFeedback] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const filters = useMemo(() => readCatalogFiltersFromSearch(location.search), [location.search]);
+  const apiFilters = useMemo(
+    () => ({
+      q: filters.q,
+      category: filters.category,
+      city: filters.city,
+      minPrice: filters.minPrice,
+      maxPrice: filters.maxPrice,
+    }),
+    [filters]
+  );
 
   const loadEvents = useCallback(
     async ({ silent = false } = {}) => {
@@ -2009,7 +2951,7 @@ function EventsPage({ auth }) {
 
       try {
         const [eventsResponse, categoriesResponse] = await Promise.all([
-          apiRequest(`/events${buildQueryString(filters)}`, { method: "GET" }),
+          apiRequest(`/events${buildEventsApiQuery(apiFilters)}`, { method: "GET" }),
           apiRequest("/events/categories", { method: "GET" }),
         ]);
 
@@ -2029,7 +2971,7 @@ function EventsPage({ auth }) {
         setIsRefreshing(false);
       }
     },
-    [auth, filters]
+    [apiFilters, auth]
   );
 
   useEffect(() => {
@@ -2037,76 +2979,210 @@ function EventsPage({ auth }) {
   }, [loadEvents]);
 
   useAutoRefresh(() => loadEvents({ silent: true }), EVENTS_REFRESH_INTERVAL);
+  const selectedCategory = categories.find((category) => category.slug === filters.category) || null;
+  const visibleEvents = useMemo(() => {
+    return events.filter((eventItem) => {
+      const matchesVenue = filters.venue
+        ? String(eventItem.venue || "").toLowerCase().includes(filters.venue.trim().toLowerCase())
+        : true;
+      const eventPrice = Number(eventItem.price || 0);
+      const matchesFreeOnly = filters.freeOnly ? eventPrice === 0 : true;
+      return matchesVenue && matchesFreeOnly;
+    });
+  }, [events, filters.freeOnly, filters.venue]);
+
+  const activeFilterLabels = [
+    filters.city ? `Ubicacion: ${filters.city}` : "",
+    filters.venue ? `Local: ${filters.venue}` : "",
+    filters.minPrice ? `Desde S/. ${filters.minPrice}` : "",
+    filters.maxPrice ? `Hasta S/. ${filters.maxPrice}` : "",
+    filters.freeOnly ? "Eventos gratuitos" : "",
+  ].filter(Boolean);
+  const eventsPerPage = 12;
+  const processedEvents = useMemo(() => {
+    const now = new Date();
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+    const next30Days = new Date(now);
+    next30Days.setDate(now.getDate() + 30);
+
+    const filteredByTime = visibleEvents.filter((eventItem) => {
+      const eventDate = eventItem.starts_at || eventItem.event_date;
+      if (!eventDate) {
+        return timeFilter === "all";
+      }
+
+      const parsedDate = new Date(eventDate);
+      if (Number.isNaN(parsedDate.getTime())) {
+        return timeFilter === "all";
+      }
+
+      if (timeFilter === "this_month") {
+        return parsedDate.getMonth() === currentMonth && parsedDate.getFullYear() === currentYear;
+      }
+
+      if (timeFilter === "next_30_days") {
+        return parsedDate >= now && parsedDate <= next30Days;
+      }
+
+      return true;
+    });
+
+    return [...filteredByTime].sort((left, right) => {
+      if (sortOrder === "price_asc") {
+        return Number(left.price || 0) - Number(right.price || 0);
+      }
+
+      if (sortOrder === "price_desc") {
+        return Number(right.price || 0) - Number(left.price || 0);
+      }
+
+      const leftDate = left.starts_at ? new Date(left.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightDate = right.starts_at ? new Date(right.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftDate - rightDate;
+    });
+  }, [sortOrder, timeFilter, visibleEvents]);
+  const totalPages = Math.max(1, Math.ceil(processedEvents.length / eventsPerPage));
+  const paginatedEvents = useMemo(() => {
+    const startIndex = (currentPage - 1) * eventsPerPage;
+    return processedEvents.slice(startIndex, startIndex + eventsPerPage);
+  }, [currentPage, processedEvents]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [location.search, sortOrder, timeFilter]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
 
   return (
-    <section className="page-section events-page">
-      <div className="section-header">
-        <div>
-          <p className="eyebrow">Catalogo</p>
-          <h2>Encuentra el evento ideal para ti</h2>
-          <p className="muted">Explora, entra al detalle y continua con tu reserva cuando elijas una experiencia.</p>
-          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
-        </div>
-      </div>
-
-      <section className="panel-card filter-panel">
-        <div className="form-grid compact-grid">
-          <label>
-            Buscar
-            <input name="q" value={filters.q} onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
-          </label>
-          <label>
-            Categoria
-            <select name="category" value={filters.category} onChange={(event) => setFilters((prev) => ({ ...prev, category: event.target.value }))}>
-              <option value="">Todas</option>
-              {categories.map((category) => (
-                <option key={category.id} value={category.slug}>
-                  {category.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Ciudad
-            <input name="city" value={filters.city} onChange={(event) => setFilters((prev) => ({ ...prev, city: event.target.value }))} />
-          </label>
-          <label>
-            Precio minimo
-            <input type="number" min="0" value={filters.minPrice} onChange={(event) => setFilters((prev) => ({ ...prev, minPrice: event.target.value }))} />
-          </label>
-          <label>
-            Precio maximo
-            <input type="number" min="0" value={filters.maxPrice} onChange={(event) => setFilters((prev) => ({ ...prev, maxPrice: event.target.value }))} />
-          </label>
-        </div>
-      </section>
-
-      {feedback ? <InlineMessage type="error" message={feedback} /> : null}
-      {isLoading ? <p className="muted">Cargando eventos...</p> : null}
-
-      {!isLoading && events.length === 0 ? (
-        <div className="empty-state card compact-state">
-          <h3>No encontramos eventos con esos filtros</h3>
-          <p className="muted">Prueba con otra categoria, ciudad o rango de precios.</p>
+    <section className="page-section events-page marketplace-results-page">
+      {selectedCategory ? (
+        <div className="market-breadcrumbs">
+          <Link to="/">Inicio</Link>
+          <span>›</span>
+          <span>Categorias</span>
+          <span>›</span>
+          <strong>{selectedCategory.name}</strong>
         </div>
       ) : null}
 
-      <div className="event-tile-grid">
-        {events.map((eventItem, index) => (
-          <Link className="event-tile-card" key={eventItem.id} to={`/events/${eventItem.id}`}>
-            <div className="event-tile-media">
-              <img src={eventItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]} alt={eventItem.title} />
+      <div className="market-results-panel card">
+        <div className="market-results-header">
+          <div className="market-results-header-copy">
+            <h2>Resultados de busqueda</h2>
+            {!isLoading ? (
+              <p className="market-results-count">
+                Mostrando {processedEvents.length} {processedEvents.length === 1 ? "resultado" : "resultados"}
+              </p>
+            ) : null}
+            {filters.q ? <p className="muted">Busqueda: "{filters.q}"</p> : null}
+            {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+          </div>
+
+          <div className="market-results-toolbar">
+            <label className="market-results-control">
+              <span>Filtro por mes:</span>
+              <select value={timeFilter} onChange={(event) => setTimeFilter(event.target.value)}>
+                <option value="all">Todos los eventos</option>
+                <option value="this_month">Este mes</option>
+                <option value="next_30_days">Proximos 30 dias</option>
+              </select>
+            </label>
+
+            <label className="market-results-control">
+              <span>Ordenar por:</span>
+              <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value)}>
+                <option value="upcoming">Proximos</option>
+                <option value="price_asc">Precio menor</option>
+                <option value="price_desc">Precio mayor</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        {activeFilterLabels.length ? (
+          <div className="market-active-filters">
+            {activeFilterLabels.map((label) => (
+              <span className="market-active-filter" key={label}>
+                {label}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        {feedback ? <InlineMessage type="error" message={feedback} /> : null}
+        {isLoading ? <p className="muted">Cargando eventos...</p> : null}
+
+        {!isLoading && processedEvents.length === 0 ? (
+          <div className="empty-state compact-state market-results-empty">
+            <h3>No encontramos eventos con esos filtros</h3>
+            <p className="muted">Prueba con otra categoria, ciudad, local o rango de precios desde el buscador superior.</p>
+          </div>
+        ) : null}
+
+        <div className="event-tile-grid market-results-grid">
+          {paginatedEvents.map((eventItem, index) => (
+            <Link className="event-tile-card market-result-card" key={eventItem.id} to={`/events/${eventItem.id}`}>
+              <div className="event-tile-media">
+                <img
+                  src={
+                    eventItem.featured_image_url ||
+                    EVENT_FALLBACK_IMAGES[((currentPage - 1) * eventsPerPage + index) % EVENT_FALLBACK_IMAGES.length]
+                  }
+                  alt={eventItem.title}
+                />
+              </div>
+              <div className="event-tile-copy">
+                <span className="event-tile-category">{eventItem.category_name || "Evento"}</span>
+                <h3>{eventItem.title}</h3>
+                <p>{formatCompactDate(eventItem.starts_at || eventItem.event_date)}</p>
+                <strong>{eventItem.city || "Peru"}</strong>
+                <small>{eventItem.venue}</small>
+                <span className="event-tile-price">Desde {formatCurrency(eventItem.price)}</span>
+              </div>
+            </Link>
+          ))}
+        </div>
+
+        {!isLoading && processedEvents.length > 0 ? (
+          <div className="market-results-pagination">
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+              disabled={currentPage === 1}
+            >
+              Anterior
+            </button>
+            <div className="market-pagination-pages">
+              {Array.from({ length: totalPages }, (_, pageIndex) => {
+                const pageNumber = pageIndex + 1;
+                return (
+                  <button
+                    className={`market-pagination-page ${pageNumber === currentPage ? "active" : ""}`}
+                    key={pageNumber}
+                    type="button"
+                    onClick={() => setCurrentPage(pageNumber)}
+                  >
+                    {pageNumber}
+                  </button>
+                );
+              })}
             </div>
-            <div className="event-tile-copy">
-              <span className="event-tile-category">{eventItem.category_name || "Evento"}</span>
-              <h3>{eventItem.title}</h3>
-              <p>{formatCompactDate(eventItem.starts_at || eventItem.event_date)}</p>
-              <strong>{eventItem.city || "Peru"}</strong>
-              <small>{eventItem.venue}</small>
-              <span className="event-tile-price">Desde {formatCurrency(eventItem.price)}</span>
-            </div>
-          </Link>
-        ))}
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+              disabled={currentPage === totalPages}
+            >
+              Siguiente
+            </button>
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -2434,7 +3510,7 @@ function EventReservationFlowPage({ auth }) {
       });
 
       clearReservationDraft(event.id);
-      navigate("/my-space", { replace: true });
+      navigate("/my-tickets", { replace: true });
     } catch (error) {
       setFeedback(getUserFacingErrorMessage(error, "No pudimos completar tu reserva en este momento."));
     } finally {
@@ -2677,38 +3753,14 @@ function EventReservationFlowPage({ auth }) {
   );
 }
 
-function DashboardPage({ auth }) {
+function CustomerTicketsPage({ auth }) {
   const [reservations, setReservations] = useState([]);
   const [feedback, setFeedback] = useState("");
-  const [profileFeedback, setProfileFeedback] = useState({ type: "", message: "" });
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [isSavingProfile, setIsSavingProfile] = useState(false);
-  const [isRequestingOrganizer, setIsRequestingOrganizer] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
   const [expandedReservationId, setExpandedReservationId] = useState(null);
   const [previewReservationId, setPreviewReservationId] = useState(null);
-  const [profileForm, setProfileForm] = useState({
-    fullName: "",
-    country: "Peru",
-    city: "",
-    documentNumber: "",
-    gender: "unspecified",
-    phone: "+51",
-    acceptsMarketing: false,
-  });
-
-  useEffect(() => {
-    setProfileForm({
-      fullName: auth.currentUser?.full_name || "",
-      country: auth.currentUser?.country || "Peru",
-      city: auth.currentUser?.city || "",
-      documentNumber: auth.currentUser?.document_number || "",
-      gender: auth.currentUser?.gender || "unspecified",
-      phone: auth.currentUser?.phone || "+51",
-      acceptsMarketing: Boolean(auth.currentUser?.accepts_marketing),
-    });
-  }, [auth.currentUser]);
 
   const loadReservations = useCallback(
     async ({ silent = false } = {}) => {
@@ -2767,59 +3819,6 @@ function DashboardPage({ auth }) {
     [orderedReservations, previewReservationId]
   );
 
-  const saveProfile = async (event) => {
-    event.preventDefault();
-
-    if (!isValidFullName(profileForm.fullName)) {
-      setProfileFeedback({ type: "error", message: "El nombre completo solo puede contener letras y espacios." });
-      return;
-    }
-
-    setIsSavingProfile(true);
-    setProfileFeedback({ type: "", message: "" });
-
-    try {
-      const response = await apiRequest("/users/me", {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${auth.token}`,
-        },
-        body: JSON.stringify(profileForm),
-      });
-
-      auth.saveSession(auth.token, response.data);
-      setProfileFeedback({ type: "success", message: response.message });
-    } catch (error) {
-      setProfileFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos actualizar tu perfil.") });
-    } finally {
-      setIsSavingProfile(false);
-    }
-  };
-
-  const requestOrganizerRole = async () => {
-    setIsRequestingOrganizer(true);
-    setProfileFeedback({ type: "", message: "" });
-
-    try {
-      const response = await apiRequest("/users/me/request-organizer", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${auth.token}`,
-        },
-      });
-
-      auth.saveSession(auth.token, response.data);
-      setProfileFeedback({ type: "success", message: response.message });
-    } catch (error) {
-      setProfileFeedback({
-        type: "error",
-        message: getUserFacingErrorMessage(error, "No pudimos enviar tu solicitud en este momento."),
-      });
-    } finally {
-      setIsRequestingOrganizer(false);
-    }
-  };
-
   const cancelReservation = async (reservationId) => {
     setCancellingId(reservationId);
     setFeedback("");
@@ -2840,40 +3839,27 @@ function DashboardPage({ auth }) {
     }
   };
 
-  const currentRole = auth.currentUser?.role;
-  const isCustomer = currentRole === "customer";
-
   return (
     <section className="page-section dashboard-page customer-dashboard">
       <header className="dashboard-section-header">
         <div>
-          <p className="eyebrow">{isCustomer ? "Mis entradas" : "Mi cuenta"}</p>
-          <h2>{isCustomer ? "Tus entradas y compras" : "Tu cuenta y reservas"}</h2>
+          <p className="eyebrow">Mis entradas</p>
+          <h2>Tus entradas y compras</h2>
           <p className="muted">
-            {isCustomer
-              ? "Visualiza tus compras por evento, abre la entrada digital y revisa el detalle completo de cada reserva."
-              : "Consulta tus reservas, mantente al dia con tu cuenta y actualiza tus datos personales."}
+            Visualiza tus compras por evento, abre la entrada digital y revisa el detalle completo de cada reserva.
           </p>
           {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
         </div>
-        <Link className="secondary-button" to="/events">
-          Ir al catalogo
-        </Link>
       </header>
 
       {feedback ? <InlineMessage type="error" message={feedback} /> : null}
 
-      <div className="dashboard-two-column align-start">
-        <section className="dashboard-stack">
-          <section className="panel-card">
+      <div className="dashboard-stack">
+        <section className="panel-card">
             <div className="panel-card-header">
               <div>
-                <h3>{isCustomer ? "Mis entradas" : "Mis reservas"}</h3>
-                <p className="muted">
-                  {isCustomer
-                    ? "Abre cada compra para ver la entrada digital y el detalle del pedido."
-                    : "Revisa el estado de tus compras y el resumen de cada reserva."}
-                </p>
+                <h3>Mis entradas</h3>
+                <p className="muted">Abre cada compra para ver la entrada digital y el detalle del pedido.</p>
               </div>
             </div>
 
@@ -2881,12 +3867,8 @@ function DashboardPage({ auth }) {
 
             {!isLoading && reservations.length === 0 ? (
               <div className="empty-state compact-state">
-                <h3>{isCustomer ? "Aun no tienes entradas" : "Aun no tienes reservas"}</h3>
-                <p className="muted">
-                  {isCustomer
-                    ? "Cuando completes una compra, aqui aparecera tu entrada digital y el detalle del evento."
-                    : "Cuando reserves eventos, apareceran aqui con detalle de tickets y pago."}
-                </p>
+                <h3>Aun no tienes entradas</h3>
+                <p className="muted">Cuando completes una compra, aqui aparecera tu entrada digital y el detalle del evento.</p>
               </div>
             ) : null}
 
@@ -3007,87 +3989,7 @@ function DashboardPage({ auth }) {
                 );
               })}
             </div>
-          </section>
         </section>
-
-        <aside className="dashboard-stack">
-          <section className="panel-card profile-card">
-            <img src={CUSTOMER_AVATAR_IMAGE} alt="Perfil del usuario" />
-            <h3>{auth.currentUser?.full_name || "Usuario CrowdPass"}</h3>
-            <p>{auth.currentUser?.email}</p>
-            <div className="profile-card-meta">
-              <div>
-                <span>Rol</span>
-                <strong>{getRoleLabel(auth.currentUser?.role)}</strong>
-              </div>
-              <div>
-                <span>Solicitud para publicar</span>
-                <strong>{getOrganizerStatusLabel(auth.currentUser?.organizer_status)}</strong>
-              </div>
-            </div>
-          </section>
-
-          <section className="panel-card">
-            <div className="panel-card-header">
-              <h3>Actualizar perfil</h3>
-            </div>
-            {profileFeedback.message ? <InlineMessage type={profileFeedback.type} message={profileFeedback.message} /> : null}
-            <form className="form-grid compact-grid" onSubmit={saveProfile}>
-              <label>
-                Nombre completo
-                <input value={profileForm.fullName} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} required />
-              </label>
-              <label>
-                Pais
-                <input value={profileForm.country} onChange={(event) => setProfileForm((prev) => ({ ...prev, country: event.target.value }))} required />
-              </label>
-              <label>
-                Ciudad
-                <input value={profileForm.city} onChange={(event) => setProfileForm((prev) => ({ ...prev, city: event.target.value }))} required />
-              </label>
-              <label>
-                Documento
-                <input value={profileForm.documentNumber} onChange={(event) => setProfileForm((prev) => ({ ...prev, documentNumber: event.target.value }))} required />
-              </label>
-              <label>
-                Genero
-                <select value={profileForm.gender} onChange={(event) => setProfileForm((prev) => ({ ...prev, gender: event.target.value }))}>
-                  {GENDER_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Telefono
-                <input value={profileForm.phone} onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} required />
-              </label>
-              <label className="checkbox-field form-span-2">
-                <input type="checkbox" checked={profileForm.acceptsMarketing} onChange={(event) => setProfileForm((prev) => ({ ...prev, acceptsMarketing: event.target.checked }))} />
-                <span>Recibir comunicaciones comerciales.</span>
-              </label>
-              <button className="primary-button" type="submit" disabled={isSavingProfile}>
-                {isSavingProfile ? "Guardando..." : "Guardar perfil"}
-              </button>
-            </form>
-          </section>
-
-          {auth.currentUser?.role === "customer" && auth.currentUser?.organizer_status !== "approved" ? (
-            <section className="panel-card promo-card">
-              <p className="eyebrow">Siguiente paso</p>
-              <h3>Solicita acceso para publicar eventos</h3>
-              <p className="muted">Cuando tu perfil este completo, puedes pedir acceso para crear y gestionar tus eventos.</p>
-              <button className="primary-button inline-action" type="button" disabled={isRequestingOrganizer || auth.currentUser?.organizer_status === "pending"} onClick={requestOrganizerRole}>
-                {auth.currentUser?.organizer_status === "pending"
-                  ? "Solicitud pendiente"
-                  : isRequestingOrganizer
-                    ? "Enviando..."
-                    : "Solicitar acceso"}
-              </button>
-            </section>
-          ) : null}
-        </aside>
       </div>
 
       {previewReservation ? (
@@ -3141,6 +4043,167 @@ function DashboardPage({ auth }) {
           </div>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function CustomerProfilePage({ auth }) {
+  const [profileFeedback, setProfileFeedback] = useState({ type: "", message: "" });
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileForm, setProfileForm] = useState({
+    fullName: "",
+    country: "Peru",
+    city: "",
+    documentNumber: "",
+    gender: "unspecified",
+    phone: "+51",
+    acceptsMarketing: false,
+  });
+
+  useEffect(() => {
+    setProfileForm({
+      fullName: auth.currentUser?.full_name || "",
+      country: auth.currentUser?.country || "Peru",
+      city: auth.currentUser?.city || "",
+      documentNumber: auth.currentUser?.document_number || "",
+      gender: auth.currentUser?.gender || "unspecified",
+      phone: auth.currentUser?.phone || "+51",
+      acceptsMarketing: Boolean(auth.currentUser?.accepts_marketing),
+    });
+  }, [auth.currentUser]);
+
+  const saveProfile = async (event) => {
+    event.preventDefault();
+
+    if (!isValidFullName(profileForm.fullName)) {
+      setProfileFeedback({ type: "error", message: "El nombre completo solo puede contener letras y espacios." });
+      return;
+    }
+
+    setIsSavingProfile(true);
+    setProfileFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/users/me", {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify(profileForm),
+      });
+
+      auth.saveSession(auth.token, response.data);
+      setProfileFeedback({ type: "success", message: response.message });
+    } catch (error) {
+      setProfileFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos actualizar tu perfil.") });
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  return (
+    <section className="page-section dashboard-page customer-profile-page">
+      <div className="profile-settings-layout">
+        <aside className="panel-card profile-settings-sidebar">
+          <p className="eyebrow">Configuracion</p>
+          <nav className="profile-settings-nav" aria-label="Configuracion de perfil">
+            <a className="active" href="#perfil">
+              Mi perfil
+            </a>
+            <a href="#cuenta">Cuenta</a>
+          </nav>
+        </aside>
+
+        <div className="dashboard-stack">
+          <section className="panel-card profile-overview-card" id="perfil">
+            <div className="profile-overview-main">
+              <img src={CUSTOMER_AVATAR_IMAGE} alt="Mi perfil" />
+              <div>
+                <p className="eyebrow">Mi perfil</p>
+                <h2>{auth.currentUser?.full_name || "Usuario CrowdPass"}</h2>
+                <p className="muted">Actualiza tus datos personales y mantén tu cuenta al día desde un solo lugar.</p>
+              </div>
+            </div>
+            <div className="profile-overview-meta">
+              <div>
+                <span>Correo</span>
+                <strong>{auth.currentUser?.email}</strong>
+              </div>
+              <div>
+                <span>Pais</span>
+                <strong>{auth.currentUser?.country || "Peru"}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel-card">
+            <div className="panel-card-header">
+              <div>
+                <h3>Datos personales</h3>
+                <p className="muted">Edita solo la información necesaria para tus próximas compras.</p>
+              </div>
+            </div>
+            {profileFeedback.message ? <InlineMessage type={profileFeedback.type} message={profileFeedback.message} /> : null}
+            <form className="form-grid compact-grid" onSubmit={saveProfile}>
+              <label>
+                Nombre completo
+                <input value={profileForm.fullName} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} required />
+              </label>
+              <label>
+                Pais
+                <input value={profileForm.country} onChange={(event) => setProfileForm((prev) => ({ ...prev, country: event.target.value }))} required />
+              </label>
+              <label>
+                Ciudad
+                <input value={profileForm.city} onChange={(event) => setProfileForm((prev) => ({ ...prev, city: event.target.value }))} required />
+              </label>
+              <label>
+                Documento
+                <input value={profileForm.documentNumber} onChange={(event) => setProfileForm((prev) => ({ ...prev, documentNumber: event.target.value }))} required />
+              </label>
+              <label>
+                Genero
+                <select value={profileForm.gender} onChange={(event) => setProfileForm((prev) => ({ ...prev, gender: event.target.value }))}>
+                  {GENDER_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Telefono
+                <input value={profileForm.phone} onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} required />
+              </label>
+              <label className="checkbox-field form-span-2">
+                <input type="checkbox" checked={profileForm.acceptsMarketing} onChange={(event) => setProfileForm((prev) => ({ ...prev, acceptsMarketing: event.target.checked }))} />
+                <span>Recibir comunicaciones comerciales.</span>
+              </label>
+              <button className="primary-button" type="submit" disabled={isSavingProfile}>
+                {isSavingProfile ? "Guardando..." : "Guardar cambios"}
+              </button>
+            </form>
+          </section>
+
+          <section className="panel-card account-danger-card" id="cuenta">
+            <div className="panel-card-header">
+              <div>
+                <h3>Cuenta</h3>
+                <p className="muted">Centraliza aquí las acciones sensibles de tu cuenta.</p>
+              </div>
+            </div>
+            <div className="account-danger-row">
+              <div>
+                <strong>Eliminar cuenta</strong>
+                <p className="muted">La opción quedará habilitada cuando terminemos el flujo seguro de eliminación en backend.</p>
+              </div>
+              <button className="ghost-button danger-button" type="button" disabled>
+                Eliminar cuenta
+              </button>
+            </div>
+          </section>
+        </div>
+      </div>
     </section>
   );
 }
@@ -4074,7 +5137,7 @@ function PublicOnlyRoute({ token, children }) {
       : null;
 
   if (token) {
-    return <Navigate to={returnTo || "/dashboard"} replace />;
+    return <Navigate to={returnTo || "/"} replace />;
   }
 
   return children;

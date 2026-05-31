@@ -36,6 +36,26 @@ function sanitizeUser(user) {
   };
 }
 
+function mapUserUniqueConstraintError(error) {
+  if (error?.code !== "23505") {
+    return null;
+  }
+
+  if (error.constraint === "users_email_key") {
+    return new ApiError(409, "El correo ya se encuentra registrado.");
+  }
+
+  if (error.constraint === "idx_users_document_number") {
+    return new ApiError(409, "El DNI o documento ya se encuentra registrado.");
+  }
+
+  if (error.constraint === "idx_users_phone") {
+    return new ApiError(409, "El telefono ya se encuentra registrado.");
+  }
+
+  return new ApiError(409, "Ya existe un usuario con esos datos registrados.");
+}
+
 async function registerUser({
   fullName,
   email,
@@ -50,6 +70,7 @@ async function registerUser({
 }) {
   const normalizedEmail = email.toLowerCase().trim();
   const normalizedDocumentNumber = documentNumber.trim();
+  const normalizedPhone = phone.trim();
   const existingUser = await userModel.findByEmail(normalizedEmail);
 
   if (existingUser) {
@@ -62,6 +83,12 @@ async function registerUser({
     throw new ApiError(409, "El DNI o documento ya se encuentra registrado.");
   }
 
+  const existingPhone = await userModel.findByPhone(normalizedPhone);
+
+  if (existingPhone) {
+    throw new ApiError(409, "El telefono ya se encuentra registrado.");
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
   const role =
     env.bootstrapAdminEmail &&
@@ -69,24 +96,79 @@ async function registerUser({
       ? "admin"
       : "customer";
 
-  const createdUser = await userModel.createUser({
-    fullName,
-    email: normalizedEmail,
-    passwordHash,
-    role,
-    country,
-    city,
-    documentNumber: normalizedDocumentNumber,
-    gender,
-    phone,
-    acceptsTerms,
-    acceptsMarketing,
-  });
+  let createdUser;
+
+  try {
+    createdUser = await userModel.createUser({
+      fullName,
+      email: normalizedEmail,
+      passwordHash,
+      role,
+      country,
+      city,
+      documentNumber: normalizedDocumentNumber,
+      gender,
+      phone: normalizedPhone,
+      acceptsTerms,
+      acceptsMarketing,
+    });
+  } catch (error) {
+    const mappedError = mapUserUniqueConstraintError(error);
+    if (mappedError) {
+      throw mappedError;
+    }
+    throw error;
+  }
 
   return {
     user: sanitizeUser(createdUser),
     token: buildToken(createdUser),
   };
+}
+
+async function checkRegistrationAvailability({ email, documentNumber, phone }) {
+  const availability = {};
+  const checks = [];
+
+  if (email) {
+    const normalizedEmail = email.toLowerCase().trim();
+    checks.push(
+      userModel.findByEmail(normalizedEmail).then((existingUser) => {
+        availability.email = {
+          available: !existingUser,
+          message: existingUser ? "El correo ya se encuentra registrado." : "",
+        };
+      })
+    );
+  }
+
+  if (documentNumber) {
+    const normalizedDocumentNumber = documentNumber.trim();
+    checks.push(
+      userModel.findByDocumentNumber(normalizedDocumentNumber).then((existingUser) => {
+        availability.documentNumber = {
+          available: !existingUser,
+          message: existingUser ? "El DNI o documento ya se encuentra registrado." : "",
+        };
+      })
+    );
+  }
+
+  if (phone) {
+    const normalizedPhone = phone.trim();
+    checks.push(
+      userModel.findByPhone(normalizedPhone).then((existingUser) => {
+        availability.phone = {
+          available: !existingUser,
+          message: existingUser ? "El telefono ya se encuentra registrado." : "",
+        };
+      })
+    );
+  }
+
+  await Promise.all(checks);
+
+  return availability;
 }
 
 async function loginUser({ email, password }) {
@@ -115,5 +197,6 @@ async function loginUser({ email, password }) {
 
 module.exports = {
   registerUser,
+  checkRegistrationAvailability,
   loginUser,
 };

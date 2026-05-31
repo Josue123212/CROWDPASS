@@ -19,6 +19,7 @@ function validateAuthPayload(payload, isRegister) {
     gender,
     phone,
     acceptsTerms,
+    acceptsMarketing,
   } = payload;
 
   if (isRegister) {
@@ -54,6 +55,10 @@ function validateAuthPayload(payload, isRegister) {
 
     if (acceptsTerms !== true) {
       throw new ApiError(400, "Debes aceptar los terminos y condiciones.");
+    }
+
+    if (acceptsMarketing !== true) {
+      throw new ApiError(400, "Debes aceptar recibir novedades comerciales y promociones.");
     }
   }
 
@@ -94,6 +99,7 @@ async function register(req, res) {
       gender,
       phone,
       acceptsTerms,
+      acceptsMarketing,
     },
     true
   );
@@ -120,6 +126,38 @@ async function register(req, res) {
   );
 }
 
+async function checkAvailability(req, res) {
+  const { email, documentNumber, phone } = req.body || {};
+  const hasAtLeastOneField = [email, documentNumber, phone].some((value) => typeof value === "string" && value.trim());
+
+  if (!hasAtLeastOneField) {
+    throw new ApiError(400, "Debes enviar al menos un campo para validar.");
+  }
+
+  if (email && !email.includes("@")) {
+    throw new ApiError(400, "El correo es obligatorio y debe ser valido.");
+  }
+
+  if (documentNumber && !DOCUMENT_REGEX.test(documentNumber.trim())) {
+    throw new ApiError(400, "El DNI o documento debe tener entre 8 y 20 caracteres alfanumericos.");
+  }
+
+  if (phone && !PHONE_REGEX.test(phone.trim())) {
+    throw new ApiError(400, "El telefono debe incluir prefijo internacional.");
+  }
+
+  const availability = await authService.checkRegistrationAvailability({
+    email: email?.trim() || "",
+    documentNumber: documentNumber?.trim() || "",
+    phone: phone?.trim() || "",
+  });
+
+  return success(res, {
+    message: "Disponibilidad validada.",
+    data: availability,
+  });
+}
+
 async function login(req, res) {
   const { email, password } = req.body;
   validateAuthPayload({ email, password }, false);
@@ -133,5 +171,6 @@ async function login(req, res) {
 
 module.exports = {
   register,
+  checkAvailability,
   login,
 };

@@ -23,7 +23,19 @@ const authRateLimit = rateLimit({
   },
 });
 
+const availabilityRateLimit = rateLimit({
+  windowMs: env.rateLimitWindowMs,
+  max: env.availabilityRateLimitMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: "Has superado el limite de validaciones anticipadas. Intenta nuevamente en unos minutos.",
+  },
+});
+
 module.exports = {
   globalRateLimit,
   authRateLimit,
+  availabilityRateLimit,
 };

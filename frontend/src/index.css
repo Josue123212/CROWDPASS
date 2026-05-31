@@ -32,6 +32,32 @@ body {
     linear-gradient(180deg, #f8f9ff 0%, #eef4ff 100%);
 }
 
+body::after {
+  content: "";
+  position: fixed;
+  inset: 60px 0 0;
+  background: rgba(11, 28, 48, 0);
+  backdrop-filter: blur(0);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    background 180ms ease,
+    backdrop-filter 180ms ease;
+  z-index: 55;
+}
+
+body.market-search-open::after {
+  opacity: 1;
+  background: rgba(11, 28, 48, 0.28);
+  backdrop-filter: blur(3px);
+}
+
+body.market-filter-open::after {
+  background: rgba(11, 28, 48, 0.28);
+  backdrop-filter: blur(3px);
+}
+
 button,
 input,
 textarea {
