@@ -5,6 +5,7 @@ node_modules/
 coverage/
 *.log
 *.jtl
+.dbg/
 npm-debug.log*
 necesario.txt
 .DS_Store
