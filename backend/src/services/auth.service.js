@@ -4,12 +4,23 @@ const env = require("../config/env");
 const userModel = require("../models/user.model");
 const ApiError = require("../utils/apiError");
 
+function isSuperAdminUser(user) {
+  if (!user || user.role !== "admin") {
+    return false;
+  }
+
+  const email = String(user.email || "").toLowerCase().trim();
+  const allowlist = Array.isArray(env.superAdminEmails) ? env.superAdminEmails : [];
+  return allowlist.map((item) => String(item).toLowerCase().trim()).includes(email);
+}
+
 function buildToken(user) {
   return jwt.sign(
     {
       sub: user.id,
       email: user.email,
       role: user.role,
+      is_super_admin: isSuperAdminUser(user),
     },
     env.jwtSecret,
     { expiresIn: env.jwtExpiresIn }
@@ -22,6 +33,7 @@ function sanitizeUser(user) {
     full_name: user.full_name,
     email: user.email,
     role: user.role,
+    is_super_admin: isSuperAdminUser(user),
     country: user.country,
     city: user.city,
     document_number: user.document_number,
@@ -195,8 +207,37 @@ async function loginUser({ email, password }) {
   };
 }
 
+async function loginSuperAdmin({ email, password }) {
+  const normalizedEmail = email.toLowerCase().trim();
+  const user = await userModel.findByEmail(normalizedEmail);
+
+  if (!user) {
+    throw new ApiError(401, "Credenciales invalidas.");
+  }
+
+  if (!user.is_active) {
+    throw new ApiError(403, "La cuenta se encuentra deshabilitada.");
+  }
+
+  const isValidPassword = await bcrypt.compare(password, user.password_hash);
+
+  if (!isValidPassword) {
+    throw new ApiError(401, "Credenciales invalidas.");
+  }
+
+  if (!isSuperAdminUser(user)) {
+    throw new ApiError(403, "No tienes permisos para ingresar al panel super admin.");
+  }
+
+  return {
+    user: sanitizeUser(user),
+    token: buildToken(user),
+  };
+}
+
 module.exports = {
   registerUser,
   checkRegistrationAvailability,
   loginUser,
+  loginSuperAdmin,
 };

@@ -20,6 +20,30 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS wallet_cards (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  brand VARCHAR(30) NOT NULL,
+  first4 VARCHAR(4),
+  last4 VARCHAR(4) NOT NULL,
+  exp_month INTEGER NOT NULL CHECK (exp_month BETWEEN 1 AND 12),
+  exp_year INTEGER NOT NULL CHECK (exp_year BETWEEN 2020 AND 2100),
+  holder_name VARCHAR(120) NOT NULL,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_cards_user_id_created_at
+  ON wallet_cards(user_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_cards_user_default
+  ON wallet_cards(user_id)
+  WHERE (is_default = TRUE);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_cards_user_fingerprint
+  ON wallet_cards(user_id, brand, last4, exp_month, exp_year);
+
 CREATE TABLE IF NOT EXISTS event_categories (
   id SERIAL PRIMARY KEY,
   slug VARCHAR(60) NOT NULL UNIQUE,
@@ -75,6 +99,25 @@ CREATE TABLE IF NOT EXISTS event_staff_assignments (
   UNIQUE (event_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS event_change_requests (
+  id SERIAL PRIMARY KEY,
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  organizer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  request_type VARCHAR(20) NOT NULL
+    CHECK (request_type IN ('update', 'cancellation')),
+  status VARCHAR(30) NOT NULL DEFAULT 'pending_review'
+    CHECK (status IN ('pending_review', 'needs_information', 'approved', 'rejected')),
+  explanation TEXT NOT NULL,
+  admin_response TEXT,
+  proposed_payload JSONB,
+  change_summary JSONB NOT NULL DEFAULT '[]'::jsonb,
+  attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+  reviewed_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS event_ticket_types (
   id SERIAL PRIMARY KEY,
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -126,6 +169,7 @@ CREATE TABLE IF NOT EXISTS reservations (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   discount_code_id INTEGER REFERENCES discount_codes(id) ON DELETE SET NULL,
+  request_key VARCHAR(80),
   reservation_code VARCHAR(40) NOT NULL UNIQUE,
   quantity INTEGER NOT NULL CHECK (quantity > 0),
   subtotal_amount NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (subtotal_amount >= 0),
@@ -142,8 +186,10 @@ CREATE TABLE IF NOT EXISTS reservations (
     CHECK (installment_count IN (1, 3, 4, 5)),
   is_refundable_purchase BOOLEAN NOT NULL DEFAULT FALSE,
   reserved_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMP,
   payment_completed_at TIMESTAMP,
-  cancelled_at TIMESTAMP
+  cancelled_at TIMESTAMP,
+  expired_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS reservation_items (
@@ -183,6 +229,8 @@ CREATE TABLE IF NOT EXISTS payments (
     CHECK (method IN ('credit_card', 'debit_card', 'pagoefectivo', 'transfer')),
   status VARCHAR(20) NOT NULL
     CHECK (status IN ('pending', 'completed', 'failed', 'refunded')),
+  wallet_card_id INTEGER REFERENCES wallet_cards(id) ON DELETE SET NULL,
+  card_snapshot_masked VARCHAR(80),
   gross_amount NUMERIC(12, 2) NOT NULL CHECK (gross_amount >= 0),
   platform_fee NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (platform_fee >= 0),
   additional_fee NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (additional_fee >= 0),
@@ -194,6 +242,9 @@ CREATE TABLE IF NOT EXISTS payments (
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_payments_wallet_card_id
+  ON payments(wallet_card_id);
 
 CREATE TABLE IF NOT EXISTS payment_installments (
   id SERIAL PRIMARY KEY,
@@ -221,6 +272,26 @@ CREATE TABLE IF NOT EXISTS refunds (
   processed_at TIMESTAMP,
   notes TEXT
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type VARCHAR(40) NOT NULL,
+  title VARCHAR(140) NOT NULL,
+  message TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status VARCHAR(20) NOT NULL DEFAULT 'unread'
+    CHECK (status IN ('unread', 'read', 'archived')),
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  read_at TIMESTAMP,
+  archived_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id_created_at
+  ON notifications(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_id_status
+  ON notifications(user_id, status);
 
 CREATE TABLE IF NOT EXISTS organizer_payouts (
   id SERIAL PRIMARY KEY,
@@ -273,9 +344,21 @@ CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_events_status ON events(status);
 CREATE INDEX IF NOT EXISTS idx_events_organizer_id ON events(organizer_id);
 CREATE INDEX IF NOT EXISTS idx_events_category_id ON events(category_id);
+CREATE INDEX IF NOT EXISTS idx_event_change_requests_event_id ON event_change_requests(event_id);
+CREATE INDEX IF NOT EXISTS idx_event_change_requests_organizer_id ON event_change_requests(organizer_id);
+CREATE INDEX IF NOT EXISTS idx_event_change_requests_status ON event_change_requests(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_change_requests_open_event
+  ON event_change_requests(event_id)
+  WHERE status IN ('pending_review', 'needs_information');
 CREATE INDEX IF NOT EXISTS idx_event_ticket_types_event_id ON event_ticket_types(event_id);
 CREATE INDEX IF NOT EXISTS idx_reservations_user_id ON reservations(user_id);
 CREATE INDEX IF NOT EXISTS idx_reservations_event_id ON reservations(event_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_expires_at
+  ON reservations(expires_at)
+  WHERE status = 'pending_payment' AND payment_status = 'pending' AND expired_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_reservations_user_request_key
+  ON reservations(user_id, request_key)
+  WHERE request_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_reservation_items_reservation_id ON reservation_items(reservation_id);
 CREATE INDEX IF NOT EXISTS idx_issued_tickets_event_id ON issued_tickets(event_id);
 CREATE INDEX IF NOT EXISTS idx_issued_tickets_owner_user_id ON issued_tickets(owner_user_id);

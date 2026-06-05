@@ -21,19 +21,30 @@ INSERT INTO users (
   role,
   country,
   city,
-  document_number,
   gender,
-  phone,
   organizer_status,
   accepts_terms,
   accepts_marketing
 )
 VALUES
-  ('Admin CrowdPass', 'admin@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'admin', 'Peru', 'Lima', '70000001', 'unspecified', '+51900000001', 'approved', TRUE, FALSE),
-  ('Organizador Demo', 'organizer@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'organizer', 'Peru', 'Lima', '70000002', 'male', '+51900000002', 'approved', TRUE, TRUE),
-  ('Cliente Demo', 'client@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'customer', 'Peru', 'Arequipa', '70000003', 'female', '+51900000003', 'not_requested', TRUE, TRUE),
-  ('Staff Demo', 'staff@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'staff', 'Peru', 'Lima', '70000004', 'other', '+51900000004', 'not_requested', TRUE, FALSE)
-ON CONFLICT (email) DO NOTHING;
+  ('Admin CrowdPass', 'admin@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'admin', 'Peru', 'Lima', 'unspecified', 'approved', TRUE, FALSE),
+  ('Organizador Demo', 'organizer@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'organizer', 'Peru', 'Lima', 'male', 'approved', TRUE, TRUE),
+  ('Customer CrowdPass', 'customer@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'customer', 'Peru', 'Lima', 'unspecified', 'not_requested', TRUE, TRUE),
+  ('Cliente Demo', 'client@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'customer', 'Peru', 'Arequipa', 'female', 'not_requested', TRUE, TRUE),
+  ('Staff Demo', 'staff@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'staff', 'Peru', 'Lima', 'other', 'not_requested', TRUE, FALSE)
+ON CONFLICT (email) DO UPDATE
+SET
+  full_name = EXCLUDED.full_name,
+  password_hash = EXCLUDED.password_hash,
+  role = EXCLUDED.role,
+  country = EXCLUDED.country,
+  city = EXCLUDED.city,
+  gender = EXCLUDED.gender,
+  organizer_status = EXCLUDED.organizer_status,
+  accepts_terms = EXCLUDED.accepts_terms,
+  accepts_marketing = EXCLUDED.accepts_marketing,
+  is_active = TRUE,
+  updated_at = NOW();
 
 INSERT INTO events (
   organizer_id,

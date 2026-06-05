@@ -45,7 +45,15 @@ function validateProfilePayload({ fullName, country, city, documentNumber, gende
 async function listUsers(req, res) {
   const page = parsePagination(req.query.page, 1);
   const limit = Math.min(parsePagination(req.query.limit, 12), 100);
-  const result = await userService.getUsers({ page, limit });
+  const organizerStatus = req.query.organizer_status;
+  const group = typeof req.query.group === "string" ? req.query.group : undefined;
+  const wantsIncludeAdmins =
+    typeof req.query.include_admins === "string" ? req.query.include_admins : undefined;
+  const includeAdmins =
+    req.user?.is_super_admin === true &&
+    (wantsIncludeAdmins === "true" || wantsIncludeAdmins === "1" || group === "admins");
+
+  const result = await userService.getUsers({ page, limit, organizerStatus, group, includeAdmins });
 
   return success(res, {
     message: "Usuarios obtenidos correctamente.",
@@ -71,9 +79,13 @@ async function getUser(req, res) {
 
 async function getCurrentUser(req, res) {
   const user = await userService.getCurrentUser(req.user.sub);
+  const payloadIsSuperAdmin = req.user?.is_super_admin === true;
   return success(res, {
     message: "Perfil obtenido correctamente.",
-    data: user,
+    data: {
+      ...user,
+      is_super_admin: payloadIsSuperAdmin,
+    },
   });
 }
 
@@ -114,11 +126,15 @@ async function updateUser(req, res) {
     throw new ApiError(400, "El campo isActive debe ser booleano.");
   }
 
-  const user = await userService.updateAdminUser(req.params.id, {
-    role,
-    organizerStatus,
-    isActive,
-  });
+  const user = await userService.updateAdminUser(
+    req.params.id,
+    {
+      role,
+      organizerStatus,
+      isActive,
+    },
+    req.user
+  );
   return success(res, {
     message: "Usuario actualizado correctamente.",
     data: user,
@@ -126,11 +142,37 @@ async function updateUser(req, res) {
 }
 
 async function deleteUser(req, res) {
-  const deletedUser = await userService.removeUser(req.params.id);
+  const deletedUser = await userService.removeUser(req.params.id, req.user.sub);
   return success(res, {
     message: "Usuario eliminado correctamente.",
     data: deletedUser,
   });
+}
+
+async function createUser(req, res) {
+  const { fullName, email, password, role, organizerStatus, isActive, country, city } = req.body;
+  const createdUser = await userService.createAdminUser(
+    {
+      fullName,
+      email,
+      password,
+      role,
+      organizerStatus,
+      isActive,
+      country,
+      city,
+    },
+    req.user
+  );
+
+  return success(
+    res,
+    {
+      message: "Usuario creado correctamente.",
+      data: createdUser,
+    },
+    201
+  );
 }
 
 module.exports = {
@@ -141,4 +183,5 @@ module.exports = {
   requestOrganizerRole,
   updateUser,
   deleteUser,
+  createUser,
 };

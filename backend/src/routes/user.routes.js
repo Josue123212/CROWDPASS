@@ -1,7 +1,7 @@
 const express = require("express");
 const userController = require("../controllers/user.controller");
 const asyncHandler = require("../utils/asyncHandler");
-const { authenticate, requireAdmin } = require("../middlewares/auth.middleware");
+const { authenticate, requireAdmin, requireSuperAdmin } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
 
@@ -13,9 +13,10 @@ router.post("/me/request-organizer", asyncHandler(userController.requestOrganize
 
 router.use(requireAdmin);
 
+router.post("/", requireSuperAdmin, asyncHandler(userController.createUser));
 router.get("/", asyncHandler(userController.listUsers));
 router.get("/:id", asyncHandler(userController.getUser));
 router.patch("/:id", asyncHandler(userController.updateUser));
-router.delete("/:id", asyncHandler(userController.deleteUser));
+router.delete("/:id", requireSuperAdmin, asyncHandler(userController.deleteUser));
 
 module.exports = router;

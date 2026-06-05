@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import QRCode from "qrcode";
 import "./App.css";
+import BackofficeLayout from "./backoffice/BackofficeLayout";
+import { BACKOFFICE_ROLE_CONFIGS } from "./backoffice/roleConfigs";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api";
+const WHATSAPP_SUPPORT_PHONE = (import.meta.env.VITE_WHATSAPP_SUPPORT_PHONE || "51928836295").trim();
+const WHATSAPP_SUPPORT_TEXT = (import.meta.env.VITE_WHATSAPP_SUPPORT_TEXT || "Hola, necesito ayuda con CrowdPass.").trim();
 const TOKEN_KEY = "crowdpass_token";
 const USER_KEY = "crowdpass_user";
+const AUTH_NOTICE_KEY = "crowdpass_auth_notice";
 const RESERVATION_DRAFT_PREFIX = "crowdpass_reservation_draft_";
+const SESSION_EXPIRED_EVENT = "crowdpass:session-expired";
+const NOTIFICATIONS_UPDATED_EVENT = "crowdpass:notifications-updated";
 const USERS_PAGE_SIZE = 12;
 const EVENTS_REFRESH_INTERVAL = 15000;
 const RESERVATIONS_REFRESH_INTERVAL = 15000;
@@ -14,6 +22,13 @@ const ORGANIZER_REFRESH_INTERVAL = 10000;
 const SERVER_STATUS_INTERVAL = 10000;
 const HOME_CAROUSEL_AUTOPLAY_DESKTOP_MS = 3800;
 const HOME_CAROUSEL_AUTOPLAY_MOBILE_MS = 5200;
+
+function buildWhatsAppUrl(phone, text) {
+  const digits = String(phone || "").replace(/[^\d]/g, "");
+  const message = String(text || "").trim();
+  const query = message ? `?text=${encodeURIComponent(message)}` : "";
+  return `https://wa.me/${digits}${query}`;
+}
 
 const HERO_EVENT_IMAGE =
   "https://lh3.googleusercontent.com/aida-public/AB6AXuCQrGBV8zgI05sX9sVGvDfJKfKItBR5jBaVrUDLo7J9dFoffYKe3c8nlcX7Ep7D34phnzfCWqlpF7zZln8ipkDyUNRNUJYHB4USYmDRd4_7LMAamDSleFAeF56rkkCjQ1qwrE5M2c5VJN3ujWK7uTlAJnBiwBFBy_-F21Ma_l4Am6bpONnrzzhxvO4BXq1I_a0PNBcHk_M3gHe8a40BFgQtYanHAoI3p6GwjIt8HiXw_o_IZI4J4VrBS8gMUrHrJJywgT1Nvzpm26a3";
@@ -54,6 +69,27 @@ const EVENT_STATUS_OPTIONS = [
   { value: "pending_review", label: "Enviar a revision" },
   { value: "paused", label: "Pausado" },
   { value: "cancelled", label: "Cancelado" },
+];
+const ORGANIZER_PROTECTED_EVENT_STATUSES = ["published", "active", "paused"];
+const CHANGE_REQUEST_FIELD_DEFINITIONS = [
+  { key: "title", label: "Titulo" },
+  { key: "category", label: "Categoria" },
+  { key: "description", label: "Descripcion" },
+  { key: "additionalInfo", label: "Informacion adicional" },
+  { key: "featuredImageUrl", label: "Imagen destacada" },
+  { key: "promoVideoUrl", label: "Video promocional" },
+  { key: "venue", label: "Venue" },
+  { key: "startsAt", label: "Inicio" },
+  { key: "endsAt", label: "Fin" },
+  { key: "visibility", label: "Visibilidad" },
+  { key: "ageRestriction", label: "Restriccion de edad" },
+  { key: "country", label: "Pais" },
+  { key: "city", label: "Ciudad" },
+  { key: "addressLine", label: "Direccion" },
+  { key: "addressReference", label: "Referencia" },
+  { key: "meetingPoint", label: "Punto de encuentro" },
+  { key: "status", label: "Estado" },
+  { key: "ticketTypes", label: "Tipos de ticket" },
 ];
 
 const PASSWORD_RULES = [
@@ -149,16 +185,42 @@ function readStoredUser() {
   }
 }
 
+function setTransientAuthNotice(message) {
+  if (!message) {
+    return;
+  }
+
+  sessionStorage.setItem(AUTH_NOTICE_KEY, message);
+}
+
+function consumeTransientAuthNotice() {
+  const notice = sessionStorage.getItem(AUTH_NOTICE_KEY);
+
+  if (!notice) {
+    return "";
+  }
+
+  sessionStorage.removeItem(AUTH_NOTICE_KEY);
+  return notice;
+}
+
 async function apiRequest(path, options = {}) {
   let response;
+  const optionHeaders = options.headers || {};
+  const shouldSkipJsonHeader =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
+  const requestHeaders = shouldSkipJsonHeader
+    ? { ...optionHeaders }
+    : {
+        "Content-Type": "application/json",
+        ...optionHeaders,
+      };
+  const requestOptions = { ...options };
 
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-      },
-      ...options,
+      ...requestOptions,
+      headers: requestHeaders,
     });
   } catch (error) {
     const networkError = new Error("No pudimos conectar con el servidor.");
@@ -167,7 +229,7 @@ async function apiRequest(path, options = {}) {
     throw networkError;
   }
 
-  let payload = null;
+  let payload;
 
   try {
     payload = await response.json();
@@ -177,6 +239,12 @@ async function apiRequest(path, options = {}) {
 
   if (!response.ok) {
     const message = payload?.message || "No se pudo completar la solicitud.";
+
+    if (response.status === 401 && requestHeaders.Authorization) {
+      setTransientAuthNotice("Tu sesion expiro. Vuelve a iniciar sesion para continuar.");
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+    }
+
     const error = new Error(message);
     error.status = response.status;
     error.payload = payload;
@@ -184,6 +252,14 @@ async function apiRequest(path, options = {}) {
   }
 
   return payload;
+}
+
+function buildIdempotencyKey(prefix = "req") {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function buildQueryString(params) {
@@ -229,8 +305,15 @@ function buildEventsApiQuery(filters) {
     q: filters.q,
     category: filters.category,
     city: filters.city,
+    venue: filters.venue,
     minPrice: filters.minPrice,
     maxPrice: filters.maxPrice,
+    freeOnly: filters.freeOnly ? "true" : "",
+    startDate: filters.startDate,
+    endDate: filters.endDate,
+    sort: filters.sort,
+    page: filters.page,
+    limit: filters.limit,
   });
 }
 
@@ -327,16 +410,20 @@ function formatPaymentMethodLabel(value) {
 }
 
 function formatPaymentStatusLabel(value) {
-  if (value === "paid") {
+  if (value === "paid" || value === "completed") {
     return "Pagado";
   }
 
+  if (value === "simulated_paid") {
+    return "Aprobado (simulado)";
+  }
+
   if (value === "pending" || value === "pending_payment") {
-    return "Pendiente";
+    return "Pendiente de pago";
   }
 
   if (value === "failed") {
-    return "Pago rechazado";
+    return "No completado";
   }
 
   if (value === "refunded") {
@@ -350,7 +437,54 @@ function formatPaymentStatusLabel(value) {
   return "Por confirmar";
 }
 
-function getReservationStatusLabel(status) {
+function formatReservationRefundStatus(value) {
+  if (value === "completed") {
+    return "Completado";
+  }
+  if (value === "rejected") {
+    return "Rechazado";
+  }
+  if (value === "processing") {
+    return "En proceso";
+  }
+  if (value === "pending") {
+    return "Pendiente";
+  }
+  return "Sin solicitud";
+}
+
+function isExpiredReservation(reservation) {
+  return Boolean(reservation?.expired_at);
+}
+
+function getReservationStatusLabel(reservationOrStatus) {
+  if (reservationOrStatus && typeof reservationOrStatus === "object" && isExpiredReservation(reservationOrStatus)) {
+    return "Expirada";
+  }
+
+  if (
+    reservationOrStatus &&
+    typeof reservationOrStatus === "object" &&
+    reservationOrStatus.refund_type === "refundable_purchase" &&
+    ["pending", "processing"].includes(reservationOrStatus.refund_status)
+  ) {
+    return "Reembolso pendiente";
+  }
+
+  if (
+    reservationOrStatus &&
+    typeof reservationOrStatus === "object" &&
+    reservationOrStatus.refund_type === "refundable_purchase" &&
+    reservationOrStatus.refund_status === "rejected"
+  ) {
+    return "Reembolso rechazado";
+  }
+
+  const status =
+    reservationOrStatus && typeof reservationOrStatus === "object"
+      ? reservationOrStatus.status
+      : reservationOrStatus;
+
   if (status === "confirmed") {
     return "Confirmada";
   }
@@ -368,6 +502,26 @@ function getReservationStatusLabel(status) {
   }
 
   return "Reserva";
+}
+
+function getReservationPaymentStatusLabel(reservation) {
+  if (isExpiredReservation(reservation)) {
+    return "Expirado";
+  }
+
+  if (reservation?.refund_type === "refundable_purchase" && ["pending", "processing"].includes(reservation?.refund_status)) {
+    return "Pendiente de reembolso";
+  }
+
+  if (reservation?.refund_type === "refundable_purchase" && reservation?.refund_status === "rejected") {
+    return "Rechazado";
+  }
+
+  return formatPaymentStatusLabel(reservation?.payment_status);
+}
+
+function hasIssuedReservationAccess(reservation) {
+  return reservation?.status === "confirmed" && ["simulated_paid", "completed"].includes(reservation?.payment_status);
 }
 
 function toDateTimeLocalInput(value) {
@@ -397,8 +551,11 @@ function isValidFullName(fullName) {
   return /^[\p{L}\s]+$/u.test(fullName.trim());
 }
 
-function getRoleHomePath(role) {
+function getRoleHomePath(role, user = null) {
   if (role === "admin") {
+    if (user?.is_super_admin) {
+      return "/superadmin/users";
+    }
     return "/admin/users";
   }
 
@@ -406,7 +563,77 @@ function getRoleHomePath(role) {
     return "/organizer/events";
   }
 
+  if (role === "staff") {
+    return "/staff/reservations";
+  }
+
   return "/my-tickets";
+}
+
+function resolveSafeReturnTo(returnTo, user = null) {
+  if (typeof returnTo !== "string" || !returnTo.startsWith("/")) {
+    return "";
+  }
+
+  const role = user?.role;
+  const isSuperAdmin = Boolean(user?.is_super_admin);
+
+  if (returnTo.startsWith("/superadmin")) {
+    return role === "admin" && isSuperAdmin ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/admin")) {
+    return role === "admin" ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/staff")) {
+    return role === "staff" ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/organizer")) {
+    return role === "organizer" ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/my-")) {
+    return role === "customer" ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/events/") && returnTo.includes("/reserve")) {
+    return role === "customer" ? returnTo : "";
+  }
+
+  if (returnTo.startsWith("/checkout/")) {
+    return role === "customer" ? returnTo : "";
+  }
+
+  return returnTo;
+}
+
+function buildEventsTimeFilterRange(timeFilter) {
+  const now = new Date();
+
+  if (timeFilter === "this_month") {
+    const startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    const endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+    return {
+      startDate: startDate.toISOString(),
+      endDate: endDate.toISOString(),
+    };
+  }
+
+  if (timeFilter === "next_30_days") {
+    const endDate = new Date(now);
+    endDate.setDate(now.getDate() + 30);
+    return {
+      startDate: now.toISOString(),
+      endDate: endDate.toISOString(),
+    };
+  }
+
+  return {
+    startDate: "",
+    endDate: "",
+  };
 }
 
 function getRoleLabel(role) {
@@ -423,6 +650,25 @@ function getRoleLabel(role) {
   }
 
   return "Cliente";
+}
+
+function getRoleMemberLink(role, user = null) {
+  if (role === "admin") {
+    if (user?.is_super_admin) {
+      return { path: "/superadmin/users", label: "Super Admin" };
+    }
+    return { path: "/admin/users", label: "Panel" };
+  }
+
+  if (role === "organizer") {
+    return { path: "/organizer/events", label: "Mis eventos" };
+  }
+
+  if (role === "staff") {
+    return { path: "/staff/reservations", label: "Operaciones" };
+  }
+
+  return { path: "/my-tickets", label: "Mis entradas" };
 }
 
 function getOrganizerStatusLabel(status) {
@@ -473,6 +719,157 @@ function getEventStatusLabel(status) {
   return "Borrador";
 }
 
+function getChangeRequestTypeLabel(type) {
+  if (type === "cancellation") {
+    return "Cancelacion";
+  }
+
+  return "Cambios";
+}
+
+function getChangeRequestStatusLabel(status) {
+  if (status === "pending_review") {
+    return "Pendiente de revision";
+  }
+
+  if (status === "needs_information") {
+    return "Falta informacion";
+  }
+
+  if (status === "approved") {
+    return "Aprobada";
+  }
+
+  if (status === "rejected") {
+    return "Rechazada";
+  }
+
+  return "Solicitud";
+}
+
+function normalizeChangePreviewDate(value) {
+  if (!value) {
+    return "";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return date.toISOString();
+}
+
+function normalizeTicketTypesForPreview(ticketTypes = []) {
+  return ticketTypes.map((ticketType) => ({
+    name: ticketType.name || "",
+    currency: ticketType.currency || "PEN",
+    price: Number(ticketType.price || 0),
+    stockTotal: Number(ticketType.stockTotal ?? ticketType.stock_total ?? 0),
+    stockAvailable: Number(ticketType.stockAvailable ?? ticketType.stock_available ?? 0),
+    salesStartsAt: normalizeChangePreviewDate(ticketType.salesStartsAt ?? ticketType.sales_starts_at ?? ""),
+    salesEndsAt: normalizeChangePreviewDate(ticketType.salesEndsAt ?? ticketType.sales_ends_at ?? ""),
+    salesEndMode: ticketType.salesEndMode ?? ticketType.sales_end_mode ?? "until_event_start",
+    maxPerOrder: Number(ticketType.maxPerOrder ?? ticketType.max_per_order ?? 0),
+    maxPerUser:
+      ticketType.maxPerUser === null ||
+        ticketType.maxPerUser === undefined ||
+        ticketType.max_per_user === null ||
+        ticketType.max_per_user === undefined
+        ? null
+        : Number(ticketType.maxPerUser ?? ticketType.max_per_user),
+  }));
+}
+
+function normalizeEventForChangePreview(event) {
+  return {
+    title: event.title || "",
+    category: event.category || event.category_slug || "",
+    description: event.description || "",
+    additionalInfo: event.additionalInfo || event.additional_info || "",
+    featuredImageUrl: event.featuredImageUrl || event.featured_image_url || "",
+    promoVideoUrl: event.promoVideoUrl || event.promo_video_url || "",
+    venue: event.venue || "",
+    startsAt: normalizeChangePreviewDate(event.startsAt || event.starts_at || event.event_date || ""),
+    endsAt: normalizeChangePreviewDate(event.endsAt || event.ends_at || ""),
+    visibility: event.visibility || "public",
+    ageRestriction: event.ageRestriction || event.age_restriction || "all_audiences",
+    country: event.country || "",
+    city: event.city || "",
+    addressLine: event.addressLine || event.address_line || "",
+    addressReference: event.addressReference || event.address_reference || "",
+    meetingPoint: event.meetingPoint || event.meeting_point || "",
+    status: event.status || "draft",
+    ticketTypes: normalizeTicketTypesForPreview(event.ticketTypes || event.ticket_types || []),
+  };
+}
+
+function buildEventChangePreview(currentEvent, nextEventData) {
+  const current = normalizeEventForChangePreview(currentEvent);
+  const next = normalizeEventForChangePreview(nextEventData);
+
+  return CHANGE_REQUEST_FIELD_DEFINITIONS.reduce((changes, fieldDefinition) => {
+    const before = current[fieldDefinition.key];
+    const after = next[fieldDefinition.key];
+
+    if (JSON.stringify(before) === JSON.stringify(after)) {
+      return changes;
+    }
+
+    changes.push({
+      field: fieldDefinition.key,
+      label: fieldDefinition.label,
+      before,
+      after,
+      isSensitive: ORGANIZER_PROTECTED_EVENT_STATUSES.includes(currentEvent.status)
+        && ["venue", "startsAt", "endsAt", "visibility", "city", "country", "addressLine", "status", "ticketTypes"].includes(
+          fieldDefinition.key
+        ),
+    });
+
+    return changes;
+  }, []);
+}
+
+function formatChangeRequestValue(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => `${item.name} · ${item.currency} ${Number(item.price || 0).toFixed(2)} · ${item.stockAvailable}/${item.stockTotal}`)
+      .join(" | ");
+  }
+
+  if (typeof value === "object" && value !== null) {
+    return JSON.stringify(value);
+  }
+
+  if (!value && value !== 0) {
+    return "Sin valor";
+  }
+
+  return String(value);
+}
+
+function formatFileSize(size) {
+  if (!size) {
+    return "0 KB";
+  }
+
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  return `${Math.max(size / 1024, 0.1).toFixed(1)} KB`;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("No pudimos leer el archivo."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function getAgeRestrictionLabel(value) {
   if (value === "18_plus") {
     return "Solo para mayores de 18";
@@ -489,9 +886,11 @@ function usePublicEventDetail(eventId, auth) {
   const [event, setEvent] = useState(null);
   const [feedback, setFeedback] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
 
   const loadEvent = useCallback(async () => {
     setIsLoading(true);
+    setNotFound(false);
 
     try {
       const response = await apiRequest(`/events/${eventId}`, { method: "GET" });
@@ -501,6 +900,13 @@ function usePublicEventDetail(eventId, auth) {
       if (isServiceUnavailableError(error)) {
         setFeedback("");
         await auth.checkServer();
+        return;
+      }
+
+      if (error?.status === 404) {
+        setEvent(null);
+        setFeedback("");
+        setNotFound(true);
         return;
       }
 
@@ -514,7 +920,7 @@ function usePublicEventDetail(eventId, auth) {
     loadEvent();
   }, [loadEvent]);
 
-  return { event, feedback, isLoading, reload: loadEvent };
+  return { event, feedback, isLoading, notFound, reload: loadEvent };
 }
 
 function getUserFacingErrorMessage(error, fallback = "No pudimos completar tu solicitud en este momento.") {
@@ -526,6 +932,18 @@ function getUserFacingErrorMessage(error, fallback = "No pudimos completar tu so
 
   if (error?.isConnectionError || (error?.status && error.status >= 500)) {
     return fallback;
+  }
+
+  if (error?.status === 401 && /token|expirad|sesion/i.test(rawMessage)) {
+    return "Tu sesion expiro. Vuelve a iniciar sesion para continuar.";
+  }
+
+  if (error?.status === 401) {
+    return rawMessage;
+  }
+
+  if (error?.status === 403 && /permisos|acceder|cancelar|crear reservas/i.test(rawMessage)) {
+    return rawMessage;
   }
 
   const technicalPatterns = [
@@ -634,17 +1052,17 @@ function mapEventToForm(eventItem) {
     status: eventItem.status === "published" ? "pending_review" : eventItem.status || "draft",
     ticketTypes: (eventItem.ticket_types || []).length
       ? eventItem.ticket_types.map((ticketType) => ({
-          name: ticketType.name || "",
-          currency: ticketType.currency || "PEN",
-          price: String(ticketType.price ?? 0),
-          stockTotal: String(ticketType.stock_total ?? 0),
-          stockAvailable: String(ticketType.stock_available ?? 0),
-          salesStartsAt: toDateTimeLocalInput(ticketType.sales_starts_at),
-          salesEndsAt: toDateTimeLocalInput(ticketType.sales_ends_at),
-          salesEndMode: ticketType.sales_end_mode || "until_event_start",
-          maxPerOrder: String(ticketType.max_per_order ?? 4),
-          maxPerUser: String(ticketType.max_per_user ?? 8),
-        }))
+        name: ticketType.name || "",
+        currency: ticketType.currency || "PEN",
+        price: String(ticketType.price ?? 0),
+        stockTotal: String(ticketType.stock_total ?? 0),
+        stockAvailable: String(ticketType.stock_available ?? 0),
+        salesStartsAt: toDateTimeLocalInput(ticketType.sales_starts_at),
+        salesEndsAt: toDateTimeLocalInput(ticketType.sales_ends_at),
+        salesEndMode: ticketType.sales_end_mode || "until_event_start",
+        maxPerOrder: String(ticketType.max_per_order ?? 4),
+        maxPerUser: String(ticketType.max_per_user ?? 8),
+      }))
       : [buildEmptyTicketType()],
   };
 }
@@ -652,6 +1070,7 @@ function mapEventToForm(eventItem) {
 function useManagedEventsData(auth, options = {}) {
   const { errorMessage = "No pudimos cargar los eventos en este momento." } = options;
   const [events, setEvents] = useState([]);
+  const [changeRequests, setChangeRequests] = useState([]);
   const [categories, setCategories] = useState([]);
   const [formData, setFormData] = useState(buildEmptyEventForm());
   const [editingEventId, setEditingEventId] = useState(null);
@@ -659,8 +1078,23 @@ function useManagedEventsData(auth, options = {}) {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isRequestSubmitting, setIsRequestSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
+  const [disablingId, setDisablingId] = useState(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [isChangeRequestModalOpen, setIsChangeRequestModalOpen] = useState(false);
+  const [changeRequestMode, setChangeRequestMode] = useState("update");
+  const [changeRequestEventId, setChangeRequestEventId] = useState(null);
+  const [changeRequestEventTitle, setChangeRequestEventTitle] = useState("");
+  const [changeRequestExplanation, setChangeRequestExplanation] = useState("");
+  const [changeRequestSummary, setChangeRequestSummary] = useState([]);
+  const [changeRequestAttachments, setChangeRequestAttachments] = useState([]);
+  const [pendingRequestedEventData, setPendingRequestedEventData] = useState(null);
+
+  const currentEditingEvent = useMemo(
+    () => events.find((eventItem) => Number(eventItem.id) === Number(editingEventId)) || null,
+    [editingEventId, events]
+  );
 
   const loadEventsData = useCallback(
     async ({ silent = false } = {}) => {
@@ -675,7 +1109,7 @@ function useManagedEventsData(auth, options = {}) {
       }
 
       try {
-        const [eventsResponse, categoriesResponse] = await Promise.all([
+        const requests = [
           apiRequest("/events/mine", {
             method: "GET",
             headers: {
@@ -683,10 +1117,24 @@ function useManagedEventsData(auth, options = {}) {
             },
           }),
           apiRequest("/events/categories", { method: "GET" }),
-        ]);
+        ];
+
+        if (auth.currentUser?.role === "organizer") {
+          requests.push(
+            apiRequest("/events/change-requests/mine", {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${auth.token}`,
+              },
+            })
+          );
+        }
+
+        const [eventsResponse, categoriesResponse, changeRequestsResponse] = await Promise.all(requests);
 
         setEvents(eventsResponse.data || []);
         setCategories(categoriesResponse.data || []);
+        setChangeRequests(changeRequestsResponse?.data || []);
         setFeedback({ type: "", message: "" });
       } catch (error) {
         setFeedback({ type: "error", message: getUserFacingErrorMessage(error, errorMessage) });
@@ -741,6 +1189,17 @@ function useManagedEventsData(auth, options = {}) {
     resetForm();
   };
 
+  const closeChangeRequestModal = () => {
+    setIsChangeRequestModalOpen(false);
+    setChangeRequestMode("update");
+    setChangeRequestEventId(null);
+    setChangeRequestEventTitle("");
+    setChangeRequestExplanation("");
+    setChangeRequestSummary([]);
+    setChangeRequestAttachments([]);
+    setPendingRequestedEventData(null);
+  };
+
   const openCreateModal = () => {
     resetForm();
     setFeedback({ type: "", message: "" });
@@ -756,6 +1215,36 @@ function useManagedEventsData(auth, options = {}) {
 
   const submitEvent = async (event) => {
     event.preventDefault();
+
+    if (
+      auth.currentUser?.role === "organizer" &&
+      currentEditingEvent &&
+      ORGANIZER_PROTECTED_EVENT_STATUSES.includes(currentEditingEvent.status)
+    ) {
+      const normalizedEventData = {
+        ...formData,
+        latitude: null,
+        longitude: null,
+      };
+      const diffSummary = buildEventChangePreview(currentEditingEvent, normalizedEventData);
+
+      if (diffSummary.length === 0) {
+        setFeedback({ type: "error", message: "No detectamos cambios reales para enviar a revision." });
+        return;
+      }
+
+      setPendingRequestedEventData(normalizedEventData);
+      setChangeRequestMode("update");
+      setChangeRequestEventId(currentEditingEvent.id);
+      setChangeRequestEventTitle(currentEditingEvent.title);
+      setChangeRequestSummary(diffSummary);
+      setChangeRequestExplanation("");
+      setChangeRequestAttachments([]);
+      setIsEventModalOpen(false);
+      setIsChangeRequestModalOpen(true);
+      return;
+    }
+
     setIsSubmitting(true);
     setFeedback({ type: "", message: "" });
 
@@ -783,6 +1272,33 @@ function useManagedEventsData(auth, options = {}) {
   };
 
   const deleteEvent = async (eventId) => {
+    const targetEvent = events.find((eventItem) => Number(eventItem.id) === Number(eventId));
+
+    if (
+      auth.currentUser?.role === "organizer" &&
+      targetEvent &&
+      ORGANIZER_PROTECTED_EVENT_STATUSES.includes(targetEvent.status)
+    ) {
+      setFeedback({ type: "", message: "" });
+      setChangeRequestMode("cancellation");
+      setChangeRequestEventId(targetEvent.id);
+      setChangeRequestEventTitle(targetEvent.title);
+      setChangeRequestSummary([
+        {
+          field: "status",
+          label: "Estado solicitado",
+          before: getEventStatusLabel(targetEvent.status),
+          after: "Cancelado",
+          isSensitive: true,
+        },
+      ]);
+      setChangeRequestExplanation("");
+      setChangeRequestAttachments([]);
+      setPendingRequestedEventData(null);
+      setIsChangeRequestModalOpen(true);
+      return;
+    }
+
     setDeletingId(eventId);
     setFeedback({ type: "", message: "" });
 
@@ -802,27 +1318,155 @@ function useManagedEventsData(auth, options = {}) {
     }
   };
 
+  const disableEvent = async (eventId) => {
+    const targetEvent = events.find((eventItem) => Number(eventItem.id) === Number(eventId));
+
+    if (!targetEvent) {
+      return;
+    }
+
+    if (targetEvent.status === "paused") {
+      setFeedback({ type: "error", message: "El evento ya se encuentra deshabilitado." });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Se deshabilitara el evento "${targetEvent.title}". Esto detiene nuevas reservas inmediatamente. Deseas continuar?`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDisablingId(eventId);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest(`/events/${eventId}/disable`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setFeedback({ type: "success", message: response.message });
+      await loadEventsData({ silent: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos deshabilitar el evento en este momento.") });
+    } finally {
+      setDisablingId(null);
+    }
+  };
+
+  const updateChangeRequestExplanation = (value) => {
+    setChangeRequestExplanation(value);
+  };
+
+  const updateChangeRequestAttachments = async (fileList) => {
+    const files = Array.from(fileList || []);
+
+    if (files.length > 3) {
+      setFeedback({ type: "error", message: "Solo puedes adjuntar hasta 3 evidencias por solicitud." });
+      return;
+    }
+
+    try {
+      const nextAttachments = await Promise.all(
+        files.map(async (file) => {
+          if (file.size > 1.5 * 1024 * 1024) {
+            throw new Error(`El archivo ${file.name} supera el limite de 1.5 MB.`);
+          }
+
+          return {
+            name: file.name,
+            mimeType: file.type || "application/octet-stream",
+            size: file.size,
+            dataUrl: await readFileAsDataUrl(file),
+          };
+        })
+      );
+
+      setChangeRequestAttachments(nextAttachments);
+    } catch (error) {
+      setFeedback({ type: "error", message: error.message || "No pudimos procesar los adjuntos." });
+    }
+  };
+
+  const removeChangeRequestAttachment = (attachmentName) => {
+    setChangeRequestAttachments((current) => current.filter((attachment) => attachment.name !== attachmentName));
+  };
+
+  const submitChangeRequest = async () => {
+    if (!changeRequestEventId) {
+      return;
+    }
+
+    setIsRequestSubmitting(true);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest(`/events/${changeRequestEventId}/change-requests`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({
+          requestType: changeRequestMode,
+          explanation: changeRequestExplanation,
+          attachments: changeRequestAttachments,
+          eventData: changeRequestMode === "update" ? pendingRequestedEventData : null,
+        }),
+      });
+
+      setFeedback({ type: "success", message: response.message });
+      closeChangeRequestModal();
+      closeEventModal();
+      await loadEventsData({ silent: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos enviar la solicitud en este momento.") });
+    } finally {
+      setIsRequestSubmitting(false);
+    }
+  };
+
   return {
     events,
+    changeRequests,
     categories,
     formData,
     editingEventId,
+    currentEditingEvent,
     feedback,
     isLoading,
     isRefreshing,
     isSubmitting,
+    isRequestSubmitting,
+    disablingId,
     deletingId,
     isEventModalOpen,
+    isChangeRequestModalOpen,
+    changeRequestMode,
+    changeRequestEventId,
+    changeRequestEventTitle,
+    changeRequestExplanation,
+    changeRequestSummary,
+    changeRequestAttachments,
     setFeedback,
     updateField,
     updateTicketType,
     addTicketType,
     removeTicketType,
     submitEvent,
+    submitChangeRequest,
     editEvent,
     deleteEvent,
+    disableEvent,
+    updateChangeRequestExplanation,
+    updateChangeRequestAttachments,
+    removeChangeRequestAttachment,
     openCreateModal,
     closeEventModal,
+    closeChangeRequestModal,
     loadEventsData,
   };
 }
@@ -1077,6 +1721,159 @@ function EventEditorModal({
   );
 }
 
+function EventChangeRequestModal({
+  attachments,
+  eventTitle,
+  explanation,
+  isOpen,
+  isSubmitting,
+  mode,
+  onAttachmentsChange,
+  onClose,
+  onExplanationChange,
+  onRemoveAttachment,
+  onSubmit,
+  summary,
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div
+      className="ticket-preview-overlay"
+      role="presentation"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div className="ticket-preview-dialog admin-event-modal">
+        <section className="panel-card admin-event-modal-card">
+          <div className="ticket-preview-header">
+            <div>
+              <p className="eyebrow">{mode === "cancellation" ? "Solicitud de cancelacion" : "Solicitud de cambios"}</p>
+              <h3>{eventTitle || "Evento"}</h3>
+              <p className="muted">
+                {mode === "cancellation"
+                  ? "Esta accion no elimina el evento directamente. Administracion revisara tu motivo y decidira si procede la cancelacion."
+                  : "Los cambios sensibles del evento se enviaran a revision antes de aplicarse al evento publicado."}
+              </p>
+            </div>
+            <button className="ghost-button" type="button" onClick={onClose}>
+              Cerrar
+            </button>
+          </div>
+
+          <div className="change-request-layout">
+            <section className="panel-card change-request-summary-card">
+              <div className="panel-card-header">
+                <div>
+                  <h3>Resumen de cambios detectados</h3>
+                  <p className="muted">Esto es lo que revisara el administrador antes de aprobar la solicitud.</p>
+                </div>
+              </div>
+
+              {!summary.length ? (
+                <div className="empty-state compact-state">
+                  <h3>Sin cambios detallados</h3>
+                  <p className="muted">La solicitud no reporta diferencias adicionales.</p>
+                </div>
+              ) : (
+                <div className="change-request-diff-list">
+                  {summary.map((item) => (
+                    <article className="change-request-diff-item" key={`${item.field}-${item.label}`}>
+                      <div className="change-request-diff-header">
+                        <strong>{item.label}</strong>
+                        {item.isSensitive ? <span className="status-pill pending_review">Sensible</span> : null}
+                      </div>
+                      <div className="change-request-diff-values">
+                        <div>
+                          <span>Antes</span>
+                          <p>{formatChangeRequestValue(item.before)}</p>
+                        </div>
+                        <div>
+                          <span>Despues</span>
+                          <p>{formatChangeRequestValue(item.after)}</p>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="panel-card change-request-form-card">
+              <div className="panel-card-header">
+                <div>
+                  <h3>Justificacion y evidencia</h3>
+                  <p className="muted">Explica el motivo real y agrega archivos de respaldo si ayudan a la revision.</p>
+                </div>
+              </div>
+
+              <label>
+                Explicacion para administracion
+                <textarea
+                  value={explanation}
+                  onChange={(event) => onExplanationChange(event.target.value)}
+                  rows="5"
+                  placeholder={
+                    mode === "cancellation"
+                      ? "Explica por que el evento debe cancelarse, el impacto esperado y si ya informaste a los asistentes."
+                      : "Explica por que necesitas estos cambios, su impacto y cualquier contexto relevante para la revision."
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Adjuntar evidencia
+                <input
+                  type="file"
+                  accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.txt"
+                  multiple
+                  onChange={(event) => onAttachmentsChange(event.target.files)}
+                />
+                <small className="muted">Hasta 3 archivos. Limite por archivo: 1.5 MB.</small>
+              </label>
+
+              {attachments.length ? (
+                <div className="change-request-attachment-list">
+                  {attachments.map((attachment) => (
+                    <div className="change-request-attachment-item" key={attachment.name}>
+                      <div>
+                        <strong>{attachment.name}</strong>
+                        <span>{formatFileSize(attachment.size)} · {attachment.mimeType}</span>
+                      </div>
+                      <button className="ghost-button inline-action" type="button" onClick={() => onRemoveAttachment(attachment.name)}>
+                        Quitar
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="cta-row compact-actions admin-event-modal-actions">
+                <button className="ghost-button" type="button" onClick={onClose}>
+                  Cancelar
+                </button>
+                <button className="primary-button" type="button" disabled={isSubmitting} onClick={onSubmit}>
+                  {isSubmitting
+                    ? "Enviando..."
+                    : mode === "cancellation"
+                      ? "Enviar solicitud de cancelacion"
+                      : "Enviar solicitud de cambios"}
+                </button>
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
 function AdminRevenueOverview({ adminSalesSummary, revenueChartData, topRevenueValue }) {
   return (
     <section className="dashboard-two-column align-start admin-events-overview">
@@ -1150,7 +1947,7 @@ function AdminRevenueOverview({ adminSalesSummary, revenueChartData, topRevenueV
   );
 }
 
-function AdminEventCatalogGrid({ events, deletingId, onEdit, onDelete }) {
+function AdminEventCatalogGrid({ events, deletingId, disablingId, onEdit, onDisable, onDelete }) {
   return (
     <div className="admin-event-catalog-grid">
       {events.map((eventItem) => {
@@ -1197,6 +1994,11 @@ function AdminEventCatalogGrid({ events, deletingId, onEdit, onDelete }) {
               <button className="secondary-button" type="button" onClick={() => onEdit(eventItem)}>
                 Editar
               </button>
+              {["published", "active"].includes(eventItem.status) ? (
+                <button className="ghost-button" type="button" disabled={disablingId === eventItem.id} onClick={() => onDisable(eventItem.id)}>
+                  {disablingId === eventItem.id ? "Deshabilitando..." : "Deshabilitar"}
+                </button>
+              ) : null}
               <button className="ghost-button" type="button" disabled={deletingId === eventItem.id} onClick={() => onDelete(eventItem.id)}>
                 {deletingId === eventItem.id ? "Eliminando..." : "Eliminar"}
               </button>
@@ -1233,7 +2035,7 @@ function App() {
       await apiRequest("/health", { method: "GET" });
       setServerState({ status: "online", message: "" });
       return true;
-    } catch (error) {
+    } catch {
       setServerState({
         status: "offline",
         message: "No pudimos verificar la disponibilidad en este momento.",
@@ -1276,6 +2078,18 @@ function App() {
   }, [token, refreshCurrentUser, clearSession]);
 
   useEffect(() => {
+    const handleSessionExpired = () => {
+      clearSession();
+    };
+
+    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
+    };
+  }, [clearSession]);
+
+  useEffect(() => {
     const previousStatus = previousServerStatusRef.current;
 
     if (serverState.status === "offline" && previousStatus !== "offline") {
@@ -1313,7 +2127,16 @@ function App() {
         <Route path="/events/:eventId/reserve" element={<EventReservationFlowPage auth={authValue} />} />
         <Route path="/events/:eventId/reserve/:step" element={<EventReservationFlowPage auth={authValue} />} />
         <Route path="/terms" element={<TermsPage />} />
+        <Route
+          path="/notifications"
+          element={
+            <ProtectedRoute token={token}>
+              <NotificationsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
         <Route path="/server-error" element={<ServerErrorPage auth={authValue} />} />
+        <Route path="/access-denied" element={<AccessDeniedPage auth={authValue} />} />
         <Route
           path="/register"
           element={
@@ -1330,6 +2153,7 @@ function App() {
             </PublicOnlyRoute>
           }
         />
+        <Route path="/superadmin/login" element={<SuperAdminLoginPage auth={authValue} />} />
       </Route>
 
       <Route
@@ -1342,6 +2166,15 @@ function App() {
       />
 
       <Route
+        path="/my-space"
+        element={
+          <ProtectedRoute token={token}>
+            <Navigate to={getRoleHomePath(currentUser?.role, currentUser)} replace />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         element={
           <ProtectedRoute token={token}>
             <MemberLayout auth={authValue} />
@@ -1349,25 +2182,135 @@ function App() {
         }
       >
         <Route
-          path="/my-space"
-          element={<Navigate to="/my-tickets" replace />}
-        />
-        <Route
           path="/my-tickets"
           element={
-            <ProtectedRoute token={token} allowedRoles={["customer", "staff"]} currentUser={currentUser}>
+            <ProtectedRoute token={token} allowedRoles={["customer"]} currentUser={currentUser}>
               <CustomerTicketsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/checkout/:reservationId"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["customer"]} currentUser={currentUser}>
+              <CustomerCheckoutPage auth={authValue} />
             </ProtectedRoute>
           }
         />
         <Route
           path="/my-profile"
           element={
-            <ProtectedRoute token={token} allowedRoles={["customer", "staff"]} currentUser={currentUser}>
+            <ProtectedRoute token={token} allowedRoles={["customer"]} currentUser={currentUser}>
               <CustomerProfilePage auth={authValue} />
             </ProtectedRoute>
           }
         />
+      </Route>
+
+      <Route
+        element={
+          <ProtectedRoute token={token} requireSuperAdmin currentUser={currentUser}>
+            <BackofficeRouteShell
+              auth={authValue}
+              avatarImage={ADMIN_AVATAR_IMAGE}
+              roleConfig={BACKOFFICE_ROLE_CONFIGS.superadmin}
+              roleLabel="Super Admin"
+            />
+          </ProtectedRoute>
+        }
+      >
+        <Route
+          path="/superadmin/users"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["admin"]} requireSuperAdmin currentUser={currentUser}>
+              <SuperAdminUsersPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/superadmin/events"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["admin"]} requireSuperAdmin currentUser={currentUser}>
+              <SuperAdminEventsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/superadmin/events/catalog"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["admin"]} requireSuperAdmin currentUser={currentUser}>
+              <AdminEventCatalogPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/superadmin/events/review"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["admin"]} requireSuperAdmin currentUser={currentUser}>
+              <AdminEventReviewPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+      </Route>
+
+      <Route
+        element={
+          <ProtectedRoute token={token}>
+            <BackofficeRouteShell
+              auth={authValue}
+              avatarImage={ADMIN_AVATAR_IMAGE}
+              roleConfig={BACKOFFICE_ROLE_CONFIGS.staff}
+              roleLabel={getRoleLabel("staff")}
+            />
+          </ProtectedRoute>
+        }
+      >
+        <Route
+          path="/staff/reservations"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["staff", "admin"]} currentUser={currentUser}>
+              <StaffReservationsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/staff/refunds"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["staff", "admin"]} currentUser={currentUser}>
+              <StaffRefundsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/staff/cancellations"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["staff", "admin"]} currentUser={currentUser}>
+              <StaffEventCancellationsPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/staff/cancellations/:eventId"
+          element={
+            <ProtectedRoute token={token} allowedRoles={["staff", "admin"]} currentUser={currentUser}>
+              <StaffEventCancellationDetailPage auth={authValue} />
+            </ProtectedRoute>
+          }
+        />
+      </Route>
+
+      <Route
+        element={
+          <ProtectedRoute token={token}>
+            <BackofficeRouteShell
+              auth={authValue}
+              avatarImage={ADMIN_AVATAR_IMAGE}
+              roleConfig={BACKOFFICE_ROLE_CONFIGS.organizer}
+              roleLabel={getRoleLabel("organizer")}
+            />
+          </ProtectedRoute>
+        }
+      >
         <Route
           path="/organizer/events"
           element={
@@ -1381,7 +2324,12 @@ function App() {
       <Route
         element={
           <ProtectedRoute token={token}>
-            <AdminLayout auth={authValue} />
+            <BackofficeRouteShell
+              auth={authValue}
+              avatarImage={ADMIN_AVATAR_IMAGE}
+              roleConfig={BACKOFFICE_ROLE_CONFIGS.admin}
+              roleLabel={getRoleLabel("admin")}
+            />
           </ProtectedRoute>
         }
       >
@@ -1435,7 +2383,9 @@ function App() {
 function MarketplaceTopbar({ auth, showMemberLink = false }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const isCustomerArea = auth.currentUser?.role === "customer" || auth.currentUser?.role === "staff";
+  const isCustomerArea = auth.currentUser?.role === "customer";
+  const memberLink = getRoleMemberLink(auth.currentUser?.role, auth.currentUser);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [categories, setCategories] = useState([]);
   const [isDiscoverMenuOpen, setIsDiscoverMenuOpen] = useState(false);
   const [isSearchPanelOpen, setIsSearchPanelOpen] = useState(false);
@@ -1469,6 +2419,41 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
       isMounted = false;
     };
   }, []);
+
+  const refreshUnreadNotifications = useCallback(async () => {
+    if (!auth.token) {
+      setUnreadNotifications(0);
+      return;
+    }
+
+    try {
+      const response = await apiRequest("/notifications/unread-count", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${auth.token}` },
+      });
+      setUnreadNotifications(Number(response.data?.unreadCount || 0));
+    } catch {
+      setUnreadNotifications(0);
+    }
+  }, [auth.token]);
+
+  useEffect(() => {
+    refreshUnreadNotifications();
+  }, [refreshUnreadNotifications]);
+
+  useAutoRefresh(refreshUnreadNotifications, RESERVATIONS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  useEffect(() => {
+    const handleNotificationsUpdated = () => {
+      refreshUnreadNotifications();
+    };
+
+    window.addEventListener(NOTIFICATIONS_UPDATED_EVENT, handleNotificationsUpdated);
+
+    return () => {
+      window.removeEventListener(NOTIFICATIONS_UPDATED_EVENT, handleNotificationsUpdated);
+    };
+  }, [refreshUnreadNotifications]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -1728,163 +2713,173 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
     <>
       <header className="public-topbar market-topbar">
         <div className="market-topbar-inner">
-        <div className="market-brand-section" ref={discoverMenuRef}>
-          <Link className="brand-mark" to="/">
-            CrowdPass
-          </Link>
-          <button
-            className={`market-discover-trigger ${isDiscoverMenuOpen || location.pathname.startsWith("/events") ? "active" : ""}`}
-            type="button"
-            onClick={() => {
-              setIsDiscoverMenuOpen((current) => !current);
-              setIsSearchPanelOpen(false);
-            }}
-          >
-            Descubrir
-            <span aria-hidden="true">{isDiscoverMenuOpen ? "⌃" : "⌄"}</span>
-          </button>
-          {showMemberLink ? (
-            <Link className={location.pathname === "/my-tickets" ? "market-member-link active" : "market-member-link"} to="/my-tickets">
-              Mis entradas
+          <div className="market-brand-section" ref={discoverMenuRef}>
+            <Link className="brand-mark" to="/">
+              CrowdPass
             </Link>
-          ) : null}
-
-          {isDiscoverMenuOpen ? (
-            <div className="market-discover-menu">
-              <button className="market-discover-all" type="button" onClick={() => navigate("/events")}>
-                Ver todas las categorias
-              </button>
-              <div className="market-discover-grid">
-                {groupedCategories.map((bucket, columnIndex) => (
-                  <div className="market-discover-column" key={`discover-column-${columnIndex}`}>
-                    {bucket.map((category) => (
-                      <button
-                        className="market-discover-item"
-                        key={category.id}
-                        type="button"
-                        onClick={() => handleDiscoverCategoryClick(category.slug)}
-                      >
-                        <span>{category.name}</span>
-                        <span aria-hidden="true">›</span>
-                      </button>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="market-search-shell" ref={searchShellRef}>
-          <div className={`market-search-input-shell ${isSearchPanelOpen ? "active" : ""}`}>
-            <span className="market-search-icon" aria-hidden="true">
-              ⌕
-            </span>
-            <input
-              className="market-search-navbar-input"
-              placeholder="Buscar por eventos o artistas"
-              value={searchDraft.q}
-              onFocus={() => {
-                setIsSearchPanelOpen(true);
-                setIsDiscoverMenuOpen(false);
-              }}
-              onChange={(event) => {
-                setSearchDraft((prev) => ({ ...prev, q: event.target.value }));
-                setIsSearchPanelOpen(true);
-                setIsDiscoverMenuOpen(false);
-              }}
-            />
             <button
-              aria-label={searchDraft.q ? "Limpiar busqueda" : "Cerrar buscador"}
-              className="market-search-clear"
+              className={`market-discover-trigger ${isDiscoverMenuOpen || location.pathname.startsWith("/events") ? "active" : ""}`}
               type="button"
               onClick={() => {
-                if (searchDraft.q) {
-                  setSearchDraft((prev) => ({ ...prev, q: "" }));
-                  return;
-                }
-
+                setIsDiscoverMenuOpen((current) => !current);
                 setIsSearchPanelOpen(false);
-                setActiveFilterModal("");
               }}
             >
-              x
+              Descubrir
+              <span aria-hidden="true">{isDiscoverMenuOpen ? "⌃" : "⌄"}</span>
             </button>
-          </div>
+            {showMemberLink ? (
+              <Link
+                className={location.pathname === memberLink.path ? "market-member-link active" : "market-member-link"}
+                to={memberLink.path}
+              >
+                {memberLink.label}
+              </Link>
+            ) : null}
 
-          {isSearchPanelOpen ? (
-            <div className="market-search-dropdown">
-              <div className="market-search-dropdown-inner">
-                <div className="market-search-panel">
-                  <div className="market-filter-chip-row">
-                    <button
-                      className={`market-filter-chip ${activeFilterModal === "price" || hasPriceFilter ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setActiveFilterModal("price")}
-                    >
-                      Precio
-                    </button>
-                    <button
-                      className={`market-filter-chip ${activeFilterModal === "categories" || selectedCategory ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setActiveFilterModal("categories")}
-                    >
-                      Categorias
-                    </button>
-                    <button
-                      className={`market-filter-chip ${activeFilterModal === "city" || searchDraft.city ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setActiveFilterModal("city")}
-                    >
-                      Ubicacion
-                    </button>
-                    <button
-                      className={`market-filter-chip ${activeFilterModal === "venue" || searchDraft.venue ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setActiveFilterModal("venue")}
-                    >
-                      Local
-                    </button>
-                  </div>
-                  {activeSearchFilters.length ? (
-                    <div className="market-search-selected-filters">
-                      {activeSearchFilters.map((filterItem) => (
+            {isDiscoverMenuOpen ? (
+              <div className="market-discover-menu">
+                <button className="market-discover-all" type="button" onClick={() => navigate("/events")}>
+                  Ver todas las categorias
+                </button>
+                <div className="market-discover-grid">
+                  {groupedCategories.map((bucket, columnIndex) => (
+                    <div className="market-discover-column" key={`discover-column-${columnIndex}`}>
+                      {bucket.map((category) => (
                         <button
-                          className="market-search-selected-chip"
-                          key={filterItem.id}
+                          className="market-discover-item"
+                          key={category.id}
                           type="button"
-                          onClick={filterItem.clear}
+                          onClick={() => handleDiscoverCategoryClick(category.slug)}
                         >
-                          <span>{filterItem.label}</span>
-                          <span aria-hidden="true">x</span>
+                          <span>{category.name}</span>
+                          <span aria-hidden="true">›</span>
                         </button>
                       ))}
                     </div>
-                  ) : null}
-                  <div className="market-search-actions">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => {
-                        setIsSearchPanelOpen(false);
-                        setActiveFilterModal("");
-                      }}
-                    >
-                      Cancelar
-                    </button>
-                    <button className="primary-button market-search-submit" type="button" onClick={applySearch}>
-                      Buscar
-                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="market-search-shell" ref={searchShellRef}>
+            <div className={`market-search-input-shell ${isSearchPanelOpen ? "active" : ""}`}>
+              <span className="market-search-icon" aria-hidden="true">
+                ⌕
+              </span>
+              <input
+                className="market-search-navbar-input"
+                placeholder={searchPlaceholder}
+                value={searchDraft.q}
+                onFocus={() => {
+                  setIsSearchPanelOpen(true);
+                  setIsDiscoverMenuOpen(false);
+                }}
+                onChange={(event) => {
+                  setSearchDraft((prev) => ({ ...prev, q: event.target.value }));
+                  setIsSearchPanelOpen(true);
+                  setIsDiscoverMenuOpen(false);
+                }}
+              />
+              <button
+                aria-label={searchDraft.q ? "Limpiar busqueda" : "Cerrar buscador"}
+                className="market-search-clear"
+                type="button"
+                onClick={() => {
+                  if (searchDraft.q) {
+                    setSearchDraft((prev) => ({ ...prev, q: "" }));
+                    return;
+                  }
+
+                  setIsSearchPanelOpen(false);
+                  setActiveFilterModal("");
+                }}
+              >
+                x
+              </button>
+            </div>
+
+            {isSearchPanelOpen ? (
+              <div className="market-search-dropdown">
+                <div className="market-search-dropdown-inner">
+                  <div className="market-search-panel">
+                    <div className="market-filter-chip-row">
+                      <button
+                        className={`market-filter-chip ${activeFilterModal === "price" || hasPriceFilter ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setActiveFilterModal("price")}
+                      >
+                        Precio
+                      </button>
+                      <button
+                        className={`market-filter-chip ${activeFilterModal === "categories" || selectedCategory ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setActiveFilterModal("categories")}
+                      >
+                        Categorias
+                      </button>
+                      <button
+                        className={`market-filter-chip ${activeFilterModal === "city" || searchDraft.city ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setActiveFilterModal("city")}
+                      >
+                        Ubicacion
+                      </button>
+                      <button
+                        className={`market-filter-chip ${activeFilterModal === "venue" || searchDraft.venue ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setActiveFilterModal("venue")}
+                      >
+                        Local
+                      </button>
+                    </div>
+                    {activeSearchFilters.length ? (
+                      <div className="market-search-selected-filters">
+                        {activeSearchFilters.map((filterItem) => (
+                          <button
+                            className="market-search-selected-chip"
+                            key={filterItem.id}
+                            type="button"
+                            onClick={filterItem.clear}
+                          >
+                            <span>{filterItem.label}</span>
+                            <span aria-hidden="true">x</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="market-search-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => {
+                          setIsSearchPanelOpen(false);
+                          setActiveFilterModal("");
+                        }}
+                      >
+                        Cancelar
+                      </button>
+                      <button className="primary-button market-search-submit" type="button" onClick={applySearch}>
+                        Buscar
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          ) : null}
-        </div>
+            ) : null}
+          </div>
 
           <div className="market-topbar-actions">
             {auth.token ? (
               <>
+                <Link
+                  className={`navbar-notifications-link ${location.pathname === "/notifications" ? "active" : ""}`}
+                  to="/notifications"
+                >
+                  Notificaciones
+                  {unreadNotifications > 0 ? <span className="navbar-notifications-count">{unreadNotifications}</span> : null}
+                </Link>
                 {isCustomerArea ? (
                   <Link
                     aria-label="Mi perfil"
@@ -1894,8 +2889,8 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
                     <img src={CUSTOMER_AVATAR_IMAGE} alt="Mi perfil" />
                   </Link>
                 ) : (
-                  <Link className="subtle-link" to={getRoleHomePath(auth.currentUser?.role)}>
-                    {auth.currentUser?.role === "admin" ? "Panel" : "Mis eventos"}
+                  <Link className="subtle-link" to={getRoleHomePath(auth.currentUser?.role, auth.currentUser)}>
+                    {getRoleMemberLink(auth.currentUser?.role, auth.currentUser).label}
                   </Link>
                 )}
                 <button className="ghost-button" type="button" onClick={handleLogout}>
@@ -1957,107 +2952,12 @@ function MemberLayout({ auth }) {
   );
 }
 
-function AdminLayout({ auth }) {
-  const location = useLocation();
-  const role = auth.currentUser?.role;
-  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const profileMenuRef = useRef(null);
-  const sidebarItems =
-    [
-      { label: "Usuarios", path: "/admin/users" },
-      { label: "Eventos", path: "/admin/events" },
-      { label: "Catalogo", path: "/admin/events/catalog" },
-      { label: "Revision", path: "/admin/events/review" },
-    ];
-
-  const titleMap = {
-    admin: "Panel administrativo",
-  };
-
-  const subtitleMap = {
-    admin: "Administra usuarios, crea eventos y revisa publicaciones pendientes.",
-  };
-
-  useEffect(() => {
-    const handleDocumentClick = (event) => {
-      if (!profileMenuRef.current?.contains(event.target)) {
-        setIsProfileMenuOpen(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleDocumentClick);
-
-    return () => {
-      document.removeEventListener("mousedown", handleDocumentClick);
-    };
-  }, []);
-
+function BackofficeRouteShell({ auth, roleConfig, roleLabel, avatarImage }) {
   return (
-    <div className="dashboard-shell">
+    <>
       <MaintenanceRedirect auth={auth} />
-
-      <aside className="dashboard-sidebar">
-        <div className="sidebar-brand">
-          <Link className="brand-mark" to="/admin/users">
-            CrowdPass
-          </Link>
-          <p>{getRoleLabel(role)}</p>
-        </div>
-
-        <nav className="sidebar-nav">
-          {sidebarItems.map((item) => (
-            <Link
-              className={`sidebar-link ${location.pathname === item.path ? "active" : ""}`}
-              key={item.label}
-              to={item.path}
-            >
-              <span>{item.label}</span>
-            </Link>
-          ))}
-        </nav>
-
-        <div className="sidebar-profile-menu" ref={profileMenuRef}>
-          <button
-            className={`sidebar-profile ${isProfileMenuOpen ? "open" : ""}`}
-            type="button"
-            onClick={() => setIsProfileMenuOpen((current) => !current)}
-          >
-            <img src={ADMIN_AVATAR_IMAGE} alt="Perfil" />
-            <div>
-              <strong>{auth.currentUser?.full_name || auth.currentUser?.email}</strong>
-              <span>{getRoleLabel(role)}</span>
-            </div>
-          </button>
-
-          {isProfileMenuOpen ? (
-            <div className="sidebar-profile-dropdown">
-              <Link className="sidebar-profile-option" to="/admin/settings" onClick={() => setIsProfileMenuOpen(false)}>
-                Ajustes
-              </Link>
-              <button className="sidebar-profile-option danger" type="button" onClick={auth.clearSession}>
-                Cerrar sesion
-              </button>
-            </div>
-          ) : null}
-        </div>
-      </aside>
-
-      <div className="dashboard-main">
-        <header className="dashboard-header">
-          <div>
-            <p className="eyebrow">CrowdPass</p>
-            <h1>{titleMap[role] || "Panel"}</h1>
-            <p className="muted">{subtitleMap[role] || "Continua gestionando tu experiencia."}</p>
-          </div>
-
-          <div className="dashboard-header-actions" />
-        </header>
-
-        <main className="dashboard-content">
-          <Outlet />
-        </main>
-      </div>
-    </div>
+      <BackofficeLayout auth={auth} avatarImage={avatarImage} roleConfig={roleConfig} roleLabel={roleLabel} />
+    </>
   );
 }
 
@@ -2079,6 +2979,9 @@ function MaintenanceRedirect({ auth }) {
 function HomePage({ auth }) {
   const [events, setEvents] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [reservations, setReservations] = useState([]);
+  const [reservationsFeedback, setReservationsFeedback] = useState("");
+  const [isLoadingReservations, setIsLoadingReservations] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [activeSlideIndex, setActiveSlideIndex] = useState(0);
@@ -2087,16 +2990,44 @@ function HomePage({ auth }) {
 
   const loadHomeData = useCallback(async () => {
     setIsLoading(true);
+    const shouldLoadReservations = Boolean(auth.token) && ["customer", "client"].includes(auth.currentUser?.role);
+    setIsLoadingReservations(shouldLoadReservations);
 
     try {
-      const [eventsResponse, categoriesResponse] = await Promise.all([
-        apiRequest("/events", { method: "GET" }),
+      const reservationsPromise = shouldLoadReservations
+        ? apiRequest("/reservations", {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${auth.token}`,
+            },
+          })
+            .then((payload) => ({ ok: true, data: payload.data || [] }))
+            .catch((error) => ({ ok: false, error }))
+        : Promise.resolve({ ok: true, data: [] });
+
+      const [eventsResponse, categoriesResponse, reservationsResult] = await Promise.all([
+        apiRequest("/events?limit=24", { method: "GET" }),
         apiRequest("/events/categories", { method: "GET" }).catch(() => ({ data: [] })),
+        reservationsPromise,
       ]);
 
       setEvents(eventsResponse.data || []);
       setCategories(categoriesResponse.data || []);
       setFeedback("");
+
+      if (reservationsResult.ok) {
+        setReservations(Array.isArray(reservationsResult.data) ? reservationsResult.data : []);
+        setReservationsFeedback("");
+      } else if (reservationsResult.error) {
+        if (isServiceUnavailableError(reservationsResult.error)) {
+          setReservationsFeedback("");
+          await auth.checkServer();
+        } else {
+          setReservationsFeedback(
+            getUserFacingErrorMessage(reservationsResult.error, "No pudimos cargar tus entradas en este momento.")
+          );
+        }
+      }
     } catch (error) {
       if (isServiceUnavailableError(error)) {
         setFeedback("");
@@ -2107,6 +3038,7 @@ function HomePage({ auth }) {
       setFeedback(getUserFacingErrorMessage(error, "No pudimos cargar la portada en este momento."));
     } finally {
       setIsLoading(false);
+      setIsLoadingReservations(false);
     }
   }, [auth]);
 
@@ -2178,6 +3110,22 @@ function HomePage({ auth }) {
   const featuredEvent = upcomingEvents[activeSlideIndex] || null;
   const sidebarSpotlightEvents = useMemo(() => upcomingEvents.slice(1, 4), [upcomingEvents]);
   const sidebarInterestPreview = useMemo(() => interestCategories.slice(0, 4), [interestCategories]);
+  const shouldShowTickets = Boolean(auth.token) && ["customer", "client"].includes(auth.currentUser?.role);
+  const orderedReservations = useMemo(() => {
+    return [...reservations].sort((left, right) => {
+      const leftDate = left.event_starts_at ? new Date(left.event_starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+      const rightDate = right.event_starts_at ? new Date(right.event_starts_at).getTime() : Number.MAX_SAFE_INTEGER;
+      return leftDate - rightDate;
+    });
+  }, [reservations]);
+  const confirmedReservations = useMemo(
+    () => orderedReservations.filter((reservation) => reservation.status === "confirmed"),
+    [orderedReservations]
+  );
+  const historyReservations = useMemo(
+    () => orderedReservations.filter((reservation) => reservation.status !== "confirmed"),
+    [orderedReservations]
+  );
 
   useEffect(() => {
     if (!upcomingEvents.length) {
@@ -2416,6 +3364,86 @@ function HomePage({ auth }) {
 
         <aside className="home-sidebar-column">
           <div className="home-sidebar-stack">
+            {shouldShowTickets ? (
+              <div className="card home-sidebar-card">
+                <span className="home-sidebar-kicker">Mis entradas</span>
+                <h3>Tus entradas</h3>
+                {isLoadingReservations ? <p className="muted">Cargando tus entradas...</p> : null}
+                {reservationsFeedback ? <p className="muted">{reservationsFeedback}</p> : null}
+
+                {!isLoadingReservations && !reservationsFeedback && reservations.length === 0 ? (
+                  <div className="empty-state compact-state">
+                    <h3>Aun no tienes entradas</h3>
+                    <p className="muted">Cuando confirmes una compra, aqui veras tus entradas confirmadas y el historial.</p>
+                  </div>
+                ) : null}
+
+                {!isLoadingReservations && reservations.length > 0 ? (
+                  <>
+                    <div className="home-discovery-divider" />
+
+                    <div>
+                      <strong>Mis entradas confirmadas</strong>
+                      <p className="muted">Solo entradas confirmadas ({confirmedReservations.length}).</p>
+                      {confirmedReservations.length ? (
+                        <div className="activity-list">
+                          {confirmedReservations.slice(0, 3).map((reservation) => (
+                            <article className="activity-item" key={`home-confirmed-${reservation.id}`}>
+                              <span className="activity-badge" aria-hidden="true">
+                                <span className="material-symbols-outlined">confirmation_number</span>
+                              </span>
+                              <div>
+                                <strong>{reservation.event_title || `Evento #${reservation.event_id}`}</strong>
+                                <span>{formatCompactDate(reservation.event_starts_at)}</span>
+                                <small>{reservation.reservation_code || `RES-${reservation.id}`}</small>
+                              </div>
+                              <span className={`status-pill ${reservation.status}`} style={{ marginLeft: "auto" }}>
+                                {getReservationStatusLabel(reservation)}
+                              </span>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">No tienes entradas confirmadas por ahora.</p>
+                      )}
+                    </div>
+
+                    <div className="home-discovery-divider" />
+
+                    <div>
+                      <strong>Historial de entradas</strong>
+                      <p className="muted">Pendientes, canceladas, expiradas o reembolsadas ({historyReservations.length}).</p>
+                      {historyReservations.length ? (
+                        <div className="activity-list">
+                          {historyReservations.slice(0, 3).map((reservation) => (
+                            <article className="activity-item" key={`home-history-${reservation.id}`}>
+                              <span className="activity-badge" aria-hidden="true">
+                                <span className="material-symbols-outlined">history</span>
+                              </span>
+                              <div>
+                                <strong>{reservation.event_title || `Evento #${reservation.event_id}`}</strong>
+                                <span>{formatCompactDate(reservation.event_starts_at)}</span>
+                                <small>{reservation.reservation_code || `RES-${reservation.id}`}</small>
+                              </div>
+                              <span className={`status-pill ${reservation.status}`} style={{ marginLeft: "auto" }}>
+                                {getReservationStatusLabel(reservation)}
+                              </span>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">No tienes historial aun.</p>
+                      )}
+                    </div>
+
+                    <Link className="ghost-button full-width-button" to="/my-tickets">
+                      Ver todas mis entradas
+                    </Link>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="card home-sidebar-card home-sidebar-media-card">
               <span className="home-side-mock-badge">Mock lateral</span>
               <div className="home-sidebar-card-copy">
@@ -2443,9 +3471,14 @@ function HomePage({ auth }) {
               <span className="home-sidebar-kicker">Organizadores</span>
               <h3>Te ayudamos a crear y vender tu evento</h3>
               <p className="muted">Sidebar mock listo para banners comerciales, captacion de organizadores y bloques promocionales persistentes.</p>
-              <Link className="primary-button full-width-button" to="/register">
+              <a
+                className="primary-button full-width-button"
+                href={buildWhatsAppUrl(WHATSAPP_SUPPORT_PHONE, WHATSAPP_SUPPORT_TEXT)}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 Contactanos
-              </Link>
+              </a>
             </div>
 
             <div className="card home-sidebar-card home-sidebar-interest-card">
@@ -2673,7 +3706,8 @@ function RegisterPage({ auth }) {
 
       auth.saveSession(response.data.token, response.data.user);
       await auth.checkServer();
-      navigate(returnTo || "/", { replace: true });
+      const safeReturnTo = resolveSafeReturnTo(returnTo, response.data.user);
+      navigate(safeReturnTo || getRoleHomePath(response.data.user?.role, response.data.user), { replace: true });
     } catch (error) {
       setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos crear tu cuenta en este momento.") });
     } finally {
@@ -2735,14 +3769,14 @@ function RegisterPage({ auth }) {
           </div>
           <div className={`password-assistant-dropdown ${shouldShowPasswordAssistant ? "visible" : ""}`} id="password-help">
             <div className="password-assistant-dropdown-content">
-                <span className="password-help-text">Usa 8+ caracteres, mayuscula, minuscula, numero y simbolo.</span>
-                <div className="password-strength-inline">
-                  <span className="password-strength-label">Seguridad</span>
-                  <span className={`password-strength-status ${passwordStrength.tone}`}>{passwordStrength.label}</span>
-                </div>
-                <div className="password-strength compact" aria-live="polite">
-                  <div className={`password-strength-bar ${passwordStrength.tone}`} style={{ width: `${passwordStrength.progress}%` }} />
-                </div>
+              <span className="password-help-text">Usa 8+ caracteres, mayuscula, minuscula, numero y simbolo.</span>
+              <div className="password-strength-inline">
+                <span className="password-strength-label">Seguridad</span>
+                <span className={`password-strength-status ${passwordStrength.tone}`}>{passwordStrength.label}</span>
+              </div>
+              <div className="password-strength compact" aria-live="polite">
+                <div className={`password-strength-bar ${passwordStrength.tone}`} style={{ width: `${passwordStrength.progress}%` }} />
+              </div>
             </div>
           </div>
         </label>
@@ -2852,6 +3886,16 @@ function LoginPage({ auth }) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
 
+  useEffect(() => {
+    const routeMessage = typeof location.state?.authMessage === "string" ? location.state.authMessage : "";
+    const transientNotice = consumeTransientAuthNotice();
+    const message = transientNotice || routeMessage;
+
+    if (message) {
+      setFeedback({ type: "error", message });
+    }
+  }, [location.state]);
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setIsSubmitting(true);
@@ -2865,7 +3909,8 @@ function LoginPage({ auth }) {
 
       auth.saveSession(response.data.token, response.data.user);
       await auth.checkServer();
-      navigate(returnTo || "/", { replace: true });
+      const safeReturnTo = resolveSafeReturnTo(returnTo, response.data.user);
+      navigate(safeReturnTo || getRoleHomePath(response.data.user?.role, response.data.user), { replace: true });
     } catch (error) {
       setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos iniciar sesion en este momento.") });
     } finally {
@@ -2919,26 +3964,178 @@ function LoginPage({ auth }) {
   );
 }
 
+function SuperAdminLoginPage({ auth }) {
+  const navigate = useNavigate();
+  const [formData, setFormData] = useState({ email: "", password: "" });
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isPasswordVisible, setIsPasswordVisible] = useState(false);
+
+  useEffect(() => {
+    if (auth.token && auth.currentUser?.is_super_admin) {
+      navigate("/superadmin/users", { replace: true });
+    }
+  }, [auth.currentUser, auth.token, navigate]);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/auth/superadmin-login", {
+        method: "POST",
+        body: JSON.stringify(formData),
+      });
+
+      auth.saveSession(response.data.token, response.data.user);
+      await auth.checkServer();
+      navigate("/superadmin/users", { replace: true });
+    } catch (error) {
+      setFeedback({
+        type: "error",
+        message: getUserFacingErrorMessage(error, "No pudimos iniciar sesion en este momento."),
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="root-admin-shell">
+      <div className="root-admin-grid" />
+      <section className="root-admin-card" aria-label="SuperAdmin Login">
+        <header className="root-admin-header">
+          <div className="root-admin-title-row">
+            <span className="root-admin-badge" aria-hidden="true">
+              ⟁
+            </span>
+            <div>
+              <h1>ROOT_ADMIN</h1>
+              <p>SYSTEM_ACCESS_PROTOCOL_v4.0</p>
+            </div>
+          </div>
+        </header>
+
+        {feedback?.message ? <InlineMessage type="error" message={feedback.message} /> : null}
+
+        <form className="root-admin-form" onSubmit={handleSubmit}>
+          <label className="root-admin-field">
+            <span>ADMIN_ID</span>
+            <div className="root-admin-input-row">
+              <input
+                name="email"
+                type="email"
+                value={formData.email}
+                autoComplete="email"
+                placeholder="IDENTIFIER_STRING"
+                onChange={(event) => setFormData((prev) => ({ ...prev, email: event.target.value }))}
+                required
+              />
+              <span className="material-symbols-outlined" aria-hidden="true">
+                badge
+              </span>
+            </div>
+          </label>
+
+          <label className="root-admin-field">
+            <span>ACCESS_KEY</span>
+            <div className="root-admin-input-row">
+              <input
+                name="password"
+                type={isPasswordVisible ? "text" : "password"}
+                value={formData.password}
+                autoComplete="current-password"
+                placeholder="••••••••••••"
+                onChange={(event) => setFormData((prev) => ({ ...prev, password: event.target.value }))}
+                required
+              />
+              <button
+                className="root-admin-eye"
+                type="button"
+                aria-label={isPasswordVisible ? "Ocultar contrasena" : "Mostrar contrasena"}
+                aria-pressed={isPasswordVisible}
+                onClick={() => setIsPasswordVisible((current) => !current)}
+              >
+                <span className="material-symbols-outlined" aria-hidden="true">
+                  {isPasswordVisible ? "visibility_off" : "visibility"}
+                </span>
+              </button>
+            </div>
+          </label>
+
+          <button className="root-admin-submit" type="submit" disabled={isSubmitting}>
+            <span className="material-symbols-outlined" aria-hidden="true">
+              login
+            </span>
+            <span>{isSubmitting ? "ACCESS_PENDING" : "ACCESS_GRANTED"}</span>
+          </button>
+
+          <div className="root-admin-footer">
+            <Link className="root-admin-recover" to="/login">
+              RECOVER_KEY
+            </Link>
+            <span className="root-admin-dots" aria-hidden="true">
+              •••
+            </span>
+          </div>
+        </form>
+
+        <footer className="root-admin-meta">
+          <span>SYSTEM_ENCRYPTION_ACTIVE</span>
+          <span>|</span>
+          <span>AES-256_RSA</span>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function SuperAdminUsersPage({ auth }) {
+  return <AdminUsersPage auth={auth} />;
+}
+
+function SuperAdminEventsPage({ auth }) {
+  return <AdminEventsPage auth={auth} />;
+}
+
 function EventsPage({ auth }) {
   const location = useLocation();
+  const eventsPerPage = 12;
   const [currentPage, setCurrentPage] = useState(1);
   const [timeFilter, setTimeFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState("upcoming");
   const [events, setEvents] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [pagination, setPagination] = useState({
+    page: 1,
+    limit: eventsPerPage,
+    total: 0,
+    totalPages: 0,
+    hasNextPage: false,
+    hasPreviousPage: false,
+  });
   const [feedback, setFeedback] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const filters = useMemo(() => readCatalogFiltersFromSearch(location.search), [location.search]);
+  const timeFilterRange = useMemo(() => buildEventsTimeFilterRange(timeFilter), [timeFilter]);
   const apiFilters = useMemo(
     () => ({
       q: filters.q,
       category: filters.category,
       city: filters.city,
+      venue: filters.venue,
       minPrice: filters.minPrice,
       maxPrice: filters.maxPrice,
+      freeOnly: filters.freeOnly,
+      startDate: timeFilterRange.startDate,
+      endDate: timeFilterRange.endDate,
+      sort: sortOrder,
+      page: currentPage,
+      limit: eventsPerPage,
     }),
-    [filters]
+    [currentPage, eventsPerPage, filters, sortOrder, timeFilterRange.endDate, timeFilterRange.startDate]
   );
 
   const loadEvents = useCallback(
@@ -2956,6 +4153,14 @@ function EventsPage({ auth }) {
         ]);
 
         setEvents(eventsResponse.data || []);
+        setPagination({
+          page: eventsResponse.meta?.page || currentPage,
+          limit: eventsResponse.meta?.limit || eventsPerPage,
+          total: eventsResponse.meta?.total || 0,
+          totalPages: eventsResponse.meta?.totalPages || 0,
+          hasNextPage: Boolean(eventsResponse.meta?.hasNextPage),
+          hasPreviousPage: Boolean(eventsResponse.meta?.hasPreviousPage),
+        });
         setCategories(categoriesResponse.data || []);
         setFeedback("");
       } catch (error) {
@@ -2971,7 +4176,7 @@ function EventsPage({ auth }) {
         setIsRefreshing(false);
       }
     },
-    [apiFilters, auth]
+    [apiFilters, auth, currentPage, eventsPerPage]
   );
 
   useEffect(() => {
@@ -2980,17 +4185,6 @@ function EventsPage({ auth }) {
 
   useAutoRefresh(() => loadEvents({ silent: true }), EVENTS_REFRESH_INTERVAL);
   const selectedCategory = categories.find((category) => category.slug === filters.category) || null;
-  const visibleEvents = useMemo(() => {
-    return events.filter((eventItem) => {
-      const matchesVenue = filters.venue
-        ? String(eventItem.venue || "").toLowerCase().includes(filters.venue.trim().toLowerCase())
-        : true;
-      const eventPrice = Number(eventItem.price || 0);
-      const matchesFreeOnly = filters.freeOnly ? eventPrice === 0 : true;
-      return matchesVenue && matchesFreeOnly;
-    });
-  }, [events, filters.freeOnly, filters.venue]);
-
   const activeFilterLabels = [
     filters.city ? `Ubicacion: ${filters.city}` : "",
     filters.venue ? `Local: ${filters.venue}` : "",
@@ -2998,62 +4192,14 @@ function EventsPage({ auth }) {
     filters.maxPrice ? `Hasta S/. ${filters.maxPrice}` : "",
     filters.freeOnly ? "Eventos gratuitos" : "",
   ].filter(Boolean);
-  const eventsPerPage = 12;
-  const processedEvents = useMemo(() => {
-    const now = new Date();
-    const currentMonth = now.getMonth();
-    const currentYear = now.getFullYear();
-    const next30Days = new Date(now);
-    next30Days.setDate(now.getDate() + 30);
-
-    const filteredByTime = visibleEvents.filter((eventItem) => {
-      const eventDate = eventItem.starts_at || eventItem.event_date;
-      if (!eventDate) {
-        return timeFilter === "all";
-      }
-
-      const parsedDate = new Date(eventDate);
-      if (Number.isNaN(parsedDate.getTime())) {
-        return timeFilter === "all";
-      }
-
-      if (timeFilter === "this_month") {
-        return parsedDate.getMonth() === currentMonth && parsedDate.getFullYear() === currentYear;
-      }
-
-      if (timeFilter === "next_30_days") {
-        return parsedDate >= now && parsedDate <= next30Days;
-      }
-
-      return true;
-    });
-
-    return [...filteredByTime].sort((left, right) => {
-      if (sortOrder === "price_asc") {
-        return Number(left.price || 0) - Number(right.price || 0);
-      }
-
-      if (sortOrder === "price_desc") {
-        return Number(right.price || 0) - Number(left.price || 0);
-      }
-
-      const leftDate = left.starts_at ? new Date(left.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
-      const rightDate = right.starts_at ? new Date(right.starts_at).getTime() : Number.MAX_SAFE_INTEGER;
-      return leftDate - rightDate;
-    });
-  }, [sortOrder, timeFilter, visibleEvents]);
-  const totalPages = Math.max(1, Math.ceil(processedEvents.length / eventsPerPage));
-  const paginatedEvents = useMemo(() => {
-    const startIndex = (currentPage - 1) * eventsPerPage;
-    return processedEvents.slice(startIndex, startIndex + eventsPerPage);
-  }, [currentPage, processedEvents]);
+  const totalPages = pagination.totalPages;
 
   useEffect(() => {
     setCurrentPage(1);
   }, [location.search, sortOrder, timeFilter]);
 
   useEffect(() => {
-    if (currentPage > totalPages) {
+    if (totalPages > 0 && currentPage > totalPages) {
       setCurrentPage(totalPages);
     }
   }, [currentPage, totalPages]);
@@ -3076,7 +4222,7 @@ function EventsPage({ auth }) {
             <h2>Resultados de busqueda</h2>
             {!isLoading ? (
               <p className="market-results-count">
-                Mostrando {processedEvents.length} {processedEvents.length === 1 ? "resultado" : "resultados"}
+                Mostrando {events.length} de {pagination.total} {pagination.total === 1 ? "resultado" : "resultados"}
               </p>
             ) : null}
             {filters.q ? <p className="muted">Busqueda: "{filters.q}"</p> : null}
@@ -3117,7 +4263,7 @@ function EventsPage({ auth }) {
         {feedback ? <InlineMessage type="error" message={feedback} /> : null}
         {isLoading ? <p className="muted">Cargando eventos...</p> : null}
 
-        {!isLoading && processedEvents.length === 0 ? (
+        {!isLoading && events.length === 0 ? (
           <div className="empty-state compact-state market-results-empty">
             <h3>No encontramos eventos con esos filtros</h3>
             <p className="muted">Prueba con otra categoria, ciudad, local o rango de precios desde el buscador superior.</p>
@@ -3125,7 +4271,7 @@ function EventsPage({ auth }) {
         ) : null}
 
         <div className="event-tile-grid market-results-grid">
-          {paginatedEvents.map((eventItem, index) => (
+          {events.map((eventItem, index) => (
             <Link className="event-tile-card market-result-card" key={eventItem.id} to={`/events/${eventItem.id}`}>
               <div className="event-tile-media">
                 <img
@@ -3148,13 +4294,13 @@ function EventsPage({ auth }) {
           ))}
         </div>
 
-        {!isLoading && processedEvents.length > 0 ? (
+        {!isLoading && events.length > 0 && totalPages > 0 ? (
           <div className="market-results-pagination">
             <button
               className="ghost-button"
               type="button"
               onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-              disabled={currentPage === 1}
+              disabled={!pagination.hasPreviousPage}
             >
               Anterior
             </button>
@@ -3177,7 +4323,7 @@ function EventsPage({ auth }) {
               className="ghost-button"
               type="button"
               onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
-              disabled={currentPage === totalPages}
+              disabled={!pagination.hasNextPage}
             >
               Siguiente
             </button>
@@ -3191,7 +4337,7 @@ function EventsPage({ auth }) {
 function EventDetailPage({ auth }) {
   const navigate = useNavigate();
   const { eventId } = useParams();
-  const { event, feedback, isLoading } = usePublicEventDetail(eventId, auth);
+  const { event, feedback, isLoading, notFound } = usePublicEventDetail(eventId, auth);
   const primaryTicket = event?.ticket_types?.[0] || null;
   const currentRole = auth.currentUser?.role;
   const canStartReservation = !currentRole || !["admin", "organizer"].includes(currentRole);
@@ -3222,6 +4368,10 @@ function EventDetailPage({ auth }) {
 
     navigate(`/events/${event.id}/reserve/tickets`);
   };
+
+  if (!isLoading && notFound) {
+    return <NotFoundPage auth={auth} />;
+  }
 
   return (
     <section className="page-section public-detail-page">
@@ -3342,26 +4492,13 @@ function EventReservationFlowPage({ auth }) {
   const { eventId, step: rawStep } = useParams();
   const validSteps = ["tickets", "attendee", "payment"];
   const currentStep = rawStep && validSteps.includes(rawStep) ? rawStep : "tickets";
-  const { event, feedback: eventFeedback, isLoading } = usePublicEventDetail(eventId, auth);
+  const { event, feedback: eventFeedback, isLoading, notFound } = usePublicEventDetail(eventId, auth);
   const [draft, setDraft] = useState(null);
   const [feedback, setFeedback] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  if (!rawStep) {
-    return <Navigate to={`/events/${eventId}/reserve/tickets`} replace />;
-  }
-
-  if (!validSteps.includes(rawStep)) {
-    return <Navigate to={`/events/${eventId}/reserve/tickets`} replace />;
-  }
-
-  if (!auth.token) {
-    return <Navigate to="/login" replace state={{ returnTo: location.pathname }} />;
-  }
-
-  if (auth.currentUser && ["admin", "organizer"].includes(auth.currentUser.role)) {
-    return <Navigate to={`/events/${eventId}`} replace />;
-  }
+  const [walletCards, setWalletCards] = useState([]);
+  const [walletFeedback, setWalletFeedback] = useState({ type: "", message: "" });
+  const [isLoadingWallet, setIsLoadingWallet] = useState(false);
 
   useEffect(() => {
     if (!event) {
@@ -3383,12 +4520,14 @@ function EventReservationFlowPage({ auth }) {
         attendeeName: storedDraft?.attendeeName || auth.currentUser?.full_name || "",
         attendeeDocumentNumber: storedDraft?.attendeeDocumentNumber || auth.currentUser?.document_number || "",
         attendeeEmail: storedDraft?.attendeeEmail || auth.currentUser?.email || "",
-        paymentMethod: storedDraft?.paymentMethod || "credit_card",
-        installmentCount: String(storedDraft?.installmentCount || 1),
+        paymentMethod: "credit_card",
+        installmentCount: "1",
         isRefundablePurchase: Boolean(storedDraft?.isRefundablePurchase),
+        paymentMode: storedDraft?.paymentMode === "temp" ? "temp" : "saved",
+        walletCardId: storedDraft?.walletCardId ? String(storedDraft.walletCardId) : "",
+        saveCard: Boolean(storedDraft?.saveCard),
         cardNumber: storedDraft?.cardNumber || "",
         cardExpiry: storedDraft?.cardExpiry || "",
-        cardCvv: storedDraft?.cardCvv || "",
         cardHolder: storedDraft?.cardHolder || auth.currentUser?.full_name || "",
       };
     });
@@ -3410,20 +4549,121 @@ function EventReservationFlowPage({ auth }) {
     draft?.attendeeName?.trim().length >= 3 &&
     draft?.attendeeDocumentNumber?.trim().length >= 6 &&
     String(draft?.attendeeEmail || "").includes("@");
-  const paymentRequiresCard = draft?.paymentMethod === "credit_card" || draft?.paymentMethod === "debit_card";
-  const paymentComplete = paymentRequiresCard
-    ? Boolean(draft?.cardNumber && draft?.cardExpiry && draft?.cardCvv && draft?.cardHolder)
-    : true;
+  const paymentComplete =
+    draft?.paymentMode === "saved"
+      ? Boolean(draft?.walletCardId)
+      : Boolean(draft?.cardNumber && draft?.cardExpiry && draft?.cardHolder);
   const stepIndex = validSteps.indexOf(currentStep);
+  const reservationRequestKeyRef = useRef("");
+
+  const resetReservationRequestKey = () => {
+    reservationRequestKeyRef.current = "";
+  };
 
   const updateDraft = (field, value) => {
+    resetReservationRequestKey();
     setDraft((current) => ({
       ...current,
       [field]: value,
     }));
   };
 
+  const selectedWalletCard = useMemo(() => {
+    if (!draft?.walletCardId) {
+      return null;
+    }
+    return walletCards.find((card) => String(card.id) === String(draft.walletCardId)) || null;
+  }, [draft?.walletCardId, walletCards]);
+
+  const loadWalletCards = useCallback(async () => {
+    if (!auth.token) {
+      return;
+    }
+
+    setIsLoadingWallet(true);
+    setWalletFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/wallet/cards", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      const cards = Array.isArray(response.data) ? response.data : [];
+      setWalletCards(cards);
+
+      if (cards.length === 0) {
+        if (draft?.paymentMode !== "temp") {
+          updateDraft("paymentMode", "temp");
+        }
+        if (draft?.walletCardId) {
+          updateDraft("walletCardId", "");
+        }
+      } else if (draft?.paymentMode === "saved" && !draft?.walletCardId) {
+        const defaultCard = cards.find((card) => card.is_default) || cards[0] || null;
+        if (defaultCard) {
+          updateDraft("walletCardId", String(defaultCard.id));
+        }
+      }
+    } catch (error) {
+      setWalletFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos cargar tus tarjetas.") });
+    } finally {
+      setIsLoadingWallet(false);
+    }
+  }, [auth.token, draft?.paymentMode, draft?.walletCardId]);
+
+  useEffect(() => {
+    if (currentStep !== "payment") {
+      return;
+    }
+    loadWalletCards();
+  }, [currentStep, loadWalletCards]);
+
+  const parseExpiry = (value) => {
+    const raw = String(value || "").trim();
+    const normalized = raw.replace(/\s+/g, "");
+    const match = normalized.match(/^(\d{1,2})\/(\d{2}|\d{4})$/);
+    if (!match) {
+      return null;
+    }
+    const month = Number(match[1]);
+    const yearRaw = Number(match[2]);
+    if (!Number.isFinite(month) || month < 1 || month > 12) {
+      return null;
+    }
+    const year = String(match[2]).length === 2 ? 2000 + yearRaw : yearRaw;
+    if (!Number.isFinite(year) || year < 2020 || year > 2100) {
+      return null;
+    }
+    return { month, year };
+  };
+
+  const normalizeCardNumber = (value) => String(value || "").replace(/\s+/g, "").trim();
+  const inferCardBrand = (cardNumber) => {
+    const normalized = normalizeCardNumber(cardNumber);
+    if (normalized.startsWith("4")) {
+      return "VISA";
+    }
+    if (normalized.startsWith("34") || normalized.startsWith("37")) {
+      return "AMEX";
+    }
+    if (normalized.startsWith("5") || normalized.startsWith("2")) {
+      return "MASTERCARD";
+    }
+    return "";
+  };
+  const detectedDraftBrand = useMemo(() => inferCardBrand(draft?.cardNumber), [draft?.cardNumber]);
+  const cardBrandLabel = useMemo(() => {
+    if (draft?.paymentMode === "saved") {
+      return selectedWalletCard?.brand || "—";
+    }
+    return detectedDraftBrand || "—";
+  }, [detectedDraftBrand, draft?.paymentMode, selectedWalletCard?.brand]);
+
   const adjustTicketSelection = (ticketType, delta) => {
+    resetReservationRequestKey();
     setDraft((current) => {
       const isCurrentTicket = String(current.ticketTypeId) === String(ticketType.id);
       const currentQuantity = isCurrentTicket ? Number(current.quantity || 0) : 0;
@@ -3492,31 +4732,93 @@ function EventReservationFlowPage({ auth }) {
     setFeedback("");
 
     try {
-      await apiRequest("/reservations", {
+      const checkoutState = {};
+
+      if (draft.walletCardId) {
+        checkoutState.walletCardId = Number(draft.walletCardId);
+      } else {
+        const cardNumber = normalizeCardNumber(draft.cardNumber);
+        if (!/^\d{12,19}$/.test(cardNumber)) {
+          throw new Error("El numero de tarjeta es invalido.");
+        }
+
+        const expiry = parseExpiry(draft.cardExpiry);
+        if (!expiry) {
+          throw new Error("La fecha de expiracion es invalida.");
+        }
+
+        const holderName = String(draft.cardHolder || "").trim();
+        if (holderName.length < 3) {
+          throw new Error("El nombre del titular es invalido.");
+        }
+
+        checkoutState.tempCard = {
+          cardNumber,
+          expMonth: expiry.month,
+          expYear: expiry.year,
+          holderName,
+        };
+        checkoutState.saveToWallet = Boolean(draft.saveCard);
+      }
+      if (!reservationRequestKeyRef.current) {
+        reservationRequestKeyRef.current = buildIdempotencyKey("reservation");
+      }
+
+      const response = await apiRequest("/reservations", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${auth.token}`,
+          "Idempotency-Key": reservationRequestKeyRef.current,
         },
         body: JSON.stringify({
           eventId: event.id,
           ticketTypeId: Number(draft.ticketTypeId),
           quantity,
-          paymentMethod: draft.paymentMethod,
-          installmentCount: Number(draft.installmentCount || 1),
+          paymentMethod: "credit_card",
+          installmentCount: 1,
           isRefundablePurchase: Boolean(draft.isRefundablePurchase),
           attendeeName: draft.attendeeName.trim(),
           attendeeDocumentNumber: draft.attendeeDocumentNumber.trim(),
         }),
       });
 
+      resetReservationRequestKey();
       clearReservationDraft(event.id);
+      if (response?.data?.status === "pending_payment") {
+        navigate(`/checkout/${response.data.id}`, { replace: true, state: checkoutState });
+        return;
+      }
+
       navigate("/my-tickets", { replace: true });
     } catch (error) {
-      setFeedback(getUserFacingErrorMessage(error, "No pudimos completar tu reserva en este momento."));
+      if (error?.message && String(error.message).includes("tarjeta")) {
+        setFeedback(String(error.message));
+      } else {
+        if (!error?.isConnectionError && (!error?.status || error.status < 500)) {
+          resetReservationRequestKey();
+        }
+        setFeedback(getUserFacingErrorMessage(error, "No pudimos completar tu reserva en este momento."));
+      }
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  if (!rawStep || !validSteps.includes(rawStep)) {
+    return <Navigate to={`/events/${eventId}/reserve/tickets`} replace />;
+  }
+
+  if (!auth.token) {
+    return <Navigate to="/login" replace state={{ returnTo: location.pathname }} />;
+  }
+
+  if (auth.currentUser && ["admin", "organizer"].includes(auth.currentUser.role)) {
+    return <Navigate to={`/events/${eventId}`} replace />;
+  }
+
+  if (!isLoading && notFound) {
+    return <NotFoundPage auth={auth} />;
+  }
 
   return (
     <section className="page-section reservation-flow-page">
@@ -3592,7 +4894,7 @@ function EventReservationFlowPage({ auth }) {
                     <Link className="ghost-button" to={`/events/${event.id}`}>
                       Volver al evento
                     </Link>
-                    <button className="primary-button" type="button" onClick={continueFromTickets}>
+                    <button className="primary-button" type="button" onClick={continueFromTickets} disabled={!selectedTicket || quantity <= 0}>
                       Continuar
                     </button>
                   </div>
@@ -3635,7 +4937,7 @@ function EventReservationFlowPage({ auth }) {
                     <button className="ghost-button" type="button" onClick={() => goToStep("tickets")}>
                       Atras
                     </button>
-                    <button className="primary-button" type="button" onClick={continueFromAttendee}>
+                    <button className="primary-button" type="button" onClick={continueFromAttendee} disabled={!attendeeComplete}>
                       Continuar al pago
                     </button>
                   </div>
@@ -3647,63 +4949,106 @@ function EventReservationFlowPage({ auth }) {
                   <div className="panel-card-header">
                     <div>
                       <h3>Metodo de pago</h3>
-                      <p className="muted">Elige como quieres finalizar tu reserva.</p>
+                      <p className="muted">Solo aceptamos tarjeta. Puedes elegir una guardada o registrar una nueva.</p>
                     </div>
                   </div>
 
-                  <div className="payment-method-grid">
-                    {PAYMENT_METHOD_OPTIONS.map((option) => (
-                      <button
-                        className={`payment-method-card ${draft.paymentMethod === option.value ? "active" : ""}`}
-                        key={option.value}
-                        type="button"
-                        onClick={() => updateDraft("paymentMethod", option.value)}
-                      >
-                        <strong>{option.label}</strong>
-                      </button>
-                    ))}
-                  </div>
+                  {walletFeedback.message ? <InlineMessage type={walletFeedback.type} message={walletFeedback.message} /> : null}
 
-                  {paymentRequiresCard ? (
-                    <div className="form-grid compact-grid payment-details-grid">
+                  <div className="form-grid compact-grid payment-details-grid">
+                    <label className="form-span-2">
+                      Metodo
+                      <select
+                        value={draft.paymentMode}
+                        onChange={(event) => {
+                          const nextMode = event.target.value === "temp" ? "temp" : "saved";
+                          updateDraft("paymentMode", nextMode);
+                          if (nextMode === "temp") {
+                            updateDraft("walletCardId", "");
+                          } else if (!draft.walletCardId) {
+                            const defaultCard = walletCards.find((card) => card.is_default) || walletCards[0] || null;
+                            if (defaultCard) {
+                              updateDraft("walletCardId", String(defaultCard.id));
+                            }
+                          }
+                        }}
+                        disabled={isLoadingWallet}
+                      >
+                        <option value="saved" disabled={walletCards.length === 0}>
+                          Tarjeta guardada
+                        </option>
+                        <option value="temp">Tarjeta temporal</option>
+                      </select>
+                    </label>
+
+                    {draft.paymentMode === "saved" ? (
                       <label className="form-span-2">
-                        Numero de tarjeta
-                        <input value={draft.cardNumber} onChange={(event) => updateDraft("cardNumber", event.target.value)} placeholder="0000 0000 0000 0000" />
-                      </label>
-                      <label>
-                        Fecha de expiracion
-                        <input value={draft.cardExpiry} onChange={(event) => updateDraft("cardExpiry", event.target.value)} placeholder="MM/YY" />
-                      </label>
-                      <label>
-                        CVV
-                        <input value={draft.cardCvv} onChange={(event) => updateDraft("cardCvv", event.target.value)} placeholder="123" />
-                      </label>
-                      <label className="form-span-2">
-                        Nombre del titular
-                        <input value={draft.cardHolder} onChange={(event) => updateDraft("cardHolder", event.target.value)} />
-                      </label>
-                      <label>
-                        Cuotas
-                        <select value={draft.installmentCount} onChange={(event) => updateDraft("installmentCount", event.target.value)}>
-                          {[1, 3, 4, 5].map((option) => (
-                            <option key={option} value={option}>
-                              {option}
+                        Mis tarjetas
+                        <select
+                          value={draft.walletCardId}
+                          onChange={(event) => updateDraft("walletCardId", event.target.value)}
+                          disabled={isLoadingWallet || walletCards.length === 0}
+                        >
+                          <option value="">Selecciona...</option>
+                          {walletCards.map((card) => (
+                            <option key={card.id} value={card.id}>
+                              {card.brand} · {card.masked} · {String(card.exp_month).padStart(2, "0")}/{card.exp_year}
                             </option>
                           ))}
                         </select>
                       </label>
-                    </div>
-                  ) : (
-                    <div className="payment-hint-card">
-                      <p className="muted">Al finalizar, registraremos tu reserva con el metodo seleccionado y veras tu entrada en tu espacio personal.</p>
-                    </div>
-                  )}
+                    ) : null}
+
+                    <label className="form-span-2">
+                      Numero de tarjeta
+                      <div className="input-prefix-field">
+                        <span className="input-prefix-label">{cardBrandLabel}</span>
+                        <input
+                          value={draft.paymentMode === "saved" && selectedWalletCard ? selectedWalletCard.masked : draft.cardNumber}
+                          onChange={(event) => updateDraft("cardNumber", event.target.value.replace(/[^\d\s]/g, ""))}
+                          placeholder="0000 0000 0000 0000"
+                          disabled={draft.paymentMode === "saved"}
+                        />
+                      </div>
+                    </label>
+                    <label>
+                      Fecha de expiracion
+                      <input
+                        value={
+                          draft.walletCardId && selectedWalletCard
+                            ? `${String(selectedWalletCard.exp_month).padStart(2, "0")}/${String(selectedWalletCard.exp_year).slice(-2)}`
+                            : draft.cardExpiry
+                        }
+                        onChange={(event) => updateDraft("cardExpiry", event.target.value)}
+                        placeholder="MM/YY"
+                        disabled={draft.paymentMode === "saved"}
+                      />
+                    </label>
+                    <label className="form-span-2">
+                      Nombre del titular
+                      <input
+                        value={draft.walletCardId && selectedWalletCard ? selectedWalletCard.holder_name : draft.cardHolder}
+                        onChange={(event) => updateDraft("cardHolder", event.target.value)}
+                        disabled={draft.paymentMode === "saved"}
+                      />
+                    </label>
+                    {draft.paymentMode === "temp" ? (
+                      <label className="form-span-2 checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draft.saveCard)}
+                          onChange={(event) => updateDraft("saveCard", event.target.checked)}
+                        />
+                        Guardar esta tarjeta en mi perfil (opcional)
+                      </label>
+                    ) : null}
+                  </div>
 
                   <div className="checkout-actions">
                     <button className="ghost-button" type="button" onClick={() => goToStep("attendee")}>
                       Atras
                     </button>
-                    <button className="primary-button" type="button" disabled={isSubmitting} onClick={completeReservation}>
+                    <button className="primary-button" type="button" disabled={isSubmitting || !paymentComplete} onClick={completeReservation}>
                       {isSubmitting ? "Procesando..." : "Finalizar reserva"}
                     </button>
                   </div>
@@ -3753,14 +5098,606 @@ function EventReservationFlowPage({ auth }) {
   );
 }
 
+function NotificationsPage({ auth }) {
+  const [items, setItems] = useState([]);
+  const [feedback, setFeedback] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [markingId, setMarkingId] = useState(null);
+  const [isMarkingAll, setIsMarkingAll] = useState(false);
+
+  const getNotificationAction = useCallback(
+    (notification) => {
+      const role = auth.currentUser?.role;
+      const isSuperAdmin = Boolean(auth.currentUser?.is_super_admin);
+      const data = notification?.data || {};
+      const eventId = data.eventId ?? data.event_id;
+      const reservationId = data.reservationId ?? data.reservation_id;
+
+      if (role === "admin") {
+        const reviewPath = isSuperAdmin ? "/superadmin/events/review" : "/admin/events/review";
+        if (
+          [
+            "event_review_pending",
+            "change_request_submitted",
+            "refund_action_required_admin",
+            "refund_escalated",
+          ].includes(notification.type)
+        ) {
+          return { label: "Ver detalle", to: notification.type.startsWith("refund") ? "/staff/refunds" : reviewPath };
+        }
+      }
+
+      if (role === "staff") {
+        if (notification.type === "refund_action_required" || notification.type === "refund_escalated") {
+          return { label: "Ver reembolsos", to: "/staff/refunds" };
+        }
+        if (notification.type === "event_paused_staff" || notification.type === "event_cancelled_staff") {
+          return { label: "Ver cancelaciones", to: "/staff/cancellations" };
+        }
+      }
+
+      if (role === "organizer") {
+        if (
+          [
+            "event_review_approved",
+            "event_review_rejected",
+            "change_request_approved",
+            "change_request_rejected",
+            "change_request_needs_information",
+          ].includes(notification.type)
+        ) {
+          return { label: "Ver solicitudes", to: "/organizer/events?view=requests" };
+        }
+      }
+
+      if (role === "customer") {
+        if (notification.type === "payment_failed" && reservationId) {
+          return { label: "Ir al pago", to: `/checkout/${reservationId}` };
+        }
+        if (["purchase_confirmed", "refund_requested", "refund_processing", "refund_completed", "refund_rejected"].includes(notification.type)) {
+          return { label: "Ver mis tickets", to: "/my-tickets" };
+        }
+        if ((notification.type === "event_paused" || notification.type === "event_cancelled") && eventId) {
+          return { label: "Ver evento", to: `/events/${eventId}` };
+        }
+      }
+
+      return null;
+    },
+    [auth.currentUser]
+  );
+
+  const loadNotifications = useCallback(async () => {
+    if (!auth.token) {
+      return;
+    }
+
+    setIsLoading(true);
+    setFeedback("");
+
+    try {
+      const query = new URLSearchParams({
+        page: String(page),
+        limit: "20",
+        ...(statusFilter !== "all" ? { status: statusFilter } : {}),
+      }).toString();
+      const response = await apiRequest(`/notifications?${query}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setItems(response.data || []);
+      setTotalPages(Number(response.meta?.totalPages || 0));
+      setFeedback("");
+    } catch (error) {
+      if (isServiceUnavailableError(error)) {
+        setFeedback("");
+        await auth.checkServer();
+        return;
+      }
+
+      setFeedback(getUserFacingErrorMessage(error, "No pudimos cargar tus notificaciones en este momento."));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [auth, page, statusFilter]);
+
+  useEffect(() => {
+    loadNotifications();
+  }, [loadNotifications]);
+
+  const markAsRead = async (notificationId) => {
+    setMarkingId(notificationId);
+    setFeedback("");
+
+    try {
+      await apiRequest(`/notifications/${notificationId}/read`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+      window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+      await loadNotifications();
+    } catch (error) {
+      if (isServiceUnavailableError(error)) {
+        setFeedback("");
+        await auth.checkServer();
+        return;
+      }
+
+      setFeedback(getUserFacingErrorMessage(error, "No pudimos actualizar esta notificacion."));
+    } finally {
+      setMarkingId(null);
+    }
+  };
+
+  const markAllAsRead = async () => {
+    setIsMarkingAll(true);
+    setFeedback("");
+
+    try {
+      await apiRequest("/notifications/read-all", {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+      window.dispatchEvent(new CustomEvent(NOTIFICATIONS_UPDATED_EVENT));
+      await loadNotifications();
+    } catch (error) {
+      if (isServiceUnavailableError(error)) {
+        setFeedback("");
+        await auth.checkServer();
+        return;
+      }
+
+      setFeedback(getUserFacingErrorMessage(error, "No pudimos marcar tus notificaciones como leidas."));
+    } finally {
+      setIsMarkingAll(false);
+    }
+  };
+
+  return (
+    <section className="page-section">
+      <div className="section-header">
+        <div>
+          <h2>Notificaciones</h2>
+          <p className="muted">Aqui veras novedades importantes sobre eventos, reservas y reembolsos.</p>
+        </div>
+        <div className="cta-row">
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            <option value="all">Todas</option>
+            <option value="unread">No leidas</option>
+            <option value="read">Leidas</option>
+          </select>
+          <button className="ghost-button" type="button" disabled={isMarkingAll} onClick={markAllAsRead}>
+            {isMarkingAll ? "Marcando..." : "Marcar todo como leido"}
+          </button>
+        </div>
+      </div>
+
+      {feedback ? <InlineMessage type="error" message={feedback} /> : null}
+      {isLoading ? <p className="muted">Cargando notificaciones...</p> : null}
+
+      {!isLoading && items.length === 0 ? (
+        <div className="empty-state card compact-state">
+          <h3>Sin notificaciones</h3>
+          <p className="muted">Cuando ocurra algo importante, lo veras aqui.</p>
+        </div>
+      ) : null}
+
+      {items.length ? (
+        <div className="notification-list">
+          {items.map((notification) => (
+            <article className={`notification-card card ${notification.status === "unread" ? "unread" : ""}`} key={notification.id}>
+              <div className="notification-card-header">
+                <div>
+                  <strong>{notification.title}</strong>
+                  <span className="muted">{formatCompactDate(notification.created_at)}</span>
+                </div>
+                <div className="cta-row">
+                  {(() => {
+                    const action = getNotificationAction(notification);
+                    return action ? (
+                      <Link className="ghost-button" to={action.to}>
+                        {action.label}
+                      </Link>
+                    ) : null;
+                  })()}
+                  {notification.status === "unread" ? (
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={markingId === notification.id}
+                      onClick={() => markAsRead(notification.id)}
+                    >
+                      {markingId === notification.id ? "Marcando..." : "Marcar leida"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <p className="muted">{notification.message}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
+      {totalPages > 1 ? (
+        <div className="pagination-bar">
+          <button className="ghost-button" type="button" disabled={page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+            Anterior
+          </button>
+          <span className="muted">
+            Pagina {page} de {totalPages}
+          </span>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={page >= totalPages}
+            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+          >
+            Siguiente
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function CustomerCheckoutPage({ auth }) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { reservationId } = useParams();
+  const [reservation, setReservation] = useState(null);
+  const [walletCards, setWalletCards] = useState([]);
+  const [paymentMode, setPaymentMode] = useState("saved");
+  const [selectedCardId, setSelectedCardId] = useState("");
+  const [tempCardNumber, setTempCardNumber] = useState("");
+  const [tempExpMonth, setTempExpMonth] = useState("");
+  const [tempExpYear, setTempExpYear] = useState("");
+  const [tempHolderName, setTempHolderName] = useState("");
+  const [tempSaveToWallet, setTempSaveToWallet] = useState(false);
+  const [tempCvv, setTempCvv] = useState("");
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
+  const [isLoading, setIsLoading] = useState(true);
+  const [isPaying, setIsPaying] = useState(false);
+  const [simulateOutcome, setSimulateOutcome] = useState("approved");
+
+  const normalizedReservationId = useMemo(() => {
+    const parsed = Number(reservationId);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }, [reservationId]);
+
+  const loadCheckoutData = useCallback(async () => {
+    if (!auth.token || !normalizedReservationId) {
+      setReservation(null);
+      setWalletCards([]);
+      setSelectedCardId("");
+      setFeedback({ type: "error", message: "El id de reserva es invalido." });
+      setIsLoading(false);
+      return;
+    }
+
+    setIsLoading(true);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const [reservationResponse, cardsResponse] = await Promise.all([
+        apiRequest(`/reservations/${normalizedReservationId}`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        }),
+        apiRequest("/wallet/cards", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        }),
+      ]);
+
+      const nextReservation = reservationResponse.data || null;
+      const nextCards = Array.isArray(cardsResponse.data) ? cardsResponse.data : [];
+      setReservation(nextReservation);
+      setWalletCards(nextCards);
+
+      const preferredWalletCardId = location?.state?.walletCardId ? String(location.state.walletCardId) : "";
+      const preferredCard = preferredWalletCardId ? nextCards.find((card) => String(card.id) === preferredWalletCardId) : null;
+      const defaultCard = nextCards.find((card) => card.is_default) || nextCards[0] || null;
+      const finalCard = preferredCard || defaultCard;
+      const incomingTempCard = location?.state?.tempCard || null;
+      if (incomingTempCard && typeof incomingTempCard === "object") {
+        setPaymentMode("temp");
+        setTempCardNumber(String(incomingTempCard.cardNumber || ""));
+        setTempExpMonth(incomingTempCard.expMonth ? String(incomingTempCard.expMonth) : "");
+        setTempExpYear(incomingTempCard.expYear ? String(incomingTempCard.expYear) : "");
+        setTempHolderName(String(incomingTempCard.holderName || ""));
+        setTempSaveToWallet(Boolean(location?.state?.saveToWallet));
+        setSelectedCardId(finalCard ? String(finalCard.id) : "");
+      } else {
+        setPaymentMode("saved");
+        setSelectedCardId(finalCard ? String(finalCard.id) : "");
+      }
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos cargar el checkout.") });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [auth.token, location?.state, normalizedReservationId]);
+
+  useEffect(() => {
+    loadCheckoutData();
+  }, [loadCheckoutData]);
+
+  const selectedCard = useMemo(() => {
+    return walletCards.find((card) => String(card.id) === String(selectedCardId)) || null;
+  }, [selectedCardId, walletCards]);
+
+  const normalizedTempCardNumber = useMemo(() => String(tempCardNumber || "").replace(/\s+/g, "").trim(), [tempCardNumber]);
+  const detectedTempBrand = useMemo(() => {
+    if (normalizedTempCardNumber.startsWith("4")) {
+      return "VISA";
+    }
+    if (normalizedTempCardNumber.startsWith("34") || normalizedTempCardNumber.startsWith("37")) {
+      return "AMEX";
+    }
+    if (normalizedTempCardNumber.startsWith("5") || normalizedTempCardNumber.startsWith("2")) {
+      return "MASTERCARD";
+    }
+    return "";
+  }, [normalizedTempCardNumber]);
+  const tempCardBrandLabel = detectedTempBrand || "—";
+
+  const handlePay = async () => {
+    if (!auth.token || !normalizedReservationId) {
+      return;
+    }
+
+    const wantsSavedCard = paymentMode === "saved";
+
+    setIsPaying(true);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const body = { reservationId: normalizedReservationId, simulateOutcome };
+
+      if (wantsSavedCard) {
+        if (!selectedCardId) {
+          setFeedback({ type: "error", message: "Selecciona una tarjeta guardada para continuar." });
+          setIsPaying(false);
+          return;
+        }
+        body.walletCardId = Number(selectedCardId);
+      } else {
+        if (!/^\d{12,19}$/.test(normalizedTempCardNumber)) {
+          setFeedback({ type: "error", message: "El numero de tarjeta es invalido." });
+          setIsPaying(false);
+          return;
+        }
+
+        const month = Number(tempExpMonth);
+        const year = Number(tempExpYear);
+        if (!Number.isFinite(month) || month < 1 || month > 12 || !Number.isFinite(year) || year < 2020 || year > 2100) {
+          setFeedback({ type: "error", message: "La fecha de expiracion es invalida." });
+          setIsPaying(false);
+          return;
+        }
+
+        const holderName = String(tempHolderName || "").trim();
+        if (holderName.length < 3) {
+          setFeedback({ type: "error", message: "El nombre del titular es invalido." });
+          setIsPaying(false);
+          return;
+        }
+
+        const cvv = String(tempCvv || "").trim().replace(/\s+/g, "");
+        if (!/^\d{3,4}$/.test(cvv)) {
+          setFeedback({ type: "error", message: "El CVV es invalido." });
+          setIsPaying(false);
+          return;
+        }
+
+        body.cardNumber = normalizedTempCardNumber;
+        body.expMonth = month;
+        body.expYear = year;
+        body.holderName = holderName;
+        body.saveToWallet = Boolean(tempSaveToWallet);
+      }
+
+      const response = await apiRequest("/payments/checkout", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      setFeedback({ type: "success", message: response.message });
+      navigate("/my-tickets", { replace: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos procesar el pago.") });
+      await loadCheckoutData();
+    } finally {
+      setIsPaying(false);
+    }
+  };
+
+  if (!normalizedReservationId) {
+    return (
+      <section className="page-section dashboard-page">
+        <InlineMessage type="error" message="El id de reserva es invalido." />
+      </section>
+    );
+  }
+
+  return (
+    <section className="page-section dashboard-page customer-dashboard">
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Checkout</p>
+          <h2>Pasarela de pagos simulada</h2>
+          <p className="muted">Paga con una tarjeta guardada o usa una tarjeta temporal.</p>
+        </div>
+      </header>
+
+      {feedback.message ? <InlineMessage type={feedback.type} message={feedback.message} /> : null}
+      {isLoading ? <p className="muted">Cargando checkout...</p> : null}
+
+      {!isLoading && reservation ? (
+        <div className="dashboard-stack">
+          <section className="panel-card">
+            <div className="panel-card-header">
+              <div>
+                <h3>Resumen</h3>
+                <p className="muted">{reservation.event_title}</p>
+              </div>
+            </div>
+            <div className="reservation-detail-grid">
+              <div>
+                <span>Reserva</span>
+                <strong>{reservation.reservation_code || `#${reservation.id}`}</strong>
+              </div>
+              <div>
+                <span>Total</span>
+                <strong>{formatCurrency(reservation.total_amount)}</strong>
+              </div>
+              <div>
+                <span>Estado</span>
+                <strong>{getReservationStatusLabel(reservation)}</strong>
+              </div>
+              <div>
+                <span>Pago</span>
+                <strong>{getReservationPaymentStatusLabel(reservation)}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel-card">
+            <div className="panel-card-header">
+              <div>
+                <h3>Tarjeta</h3>
+                <p className="muted">Usaremos tu tarjeta seleccionada para la devolución si aplica.</p>
+              </div>
+            </div>
+
+            <div className="form-grid compact-grid">
+              <label className="form-span-2">
+                Metodo
+                <select value={paymentMode} onChange={(event) => setPaymentMode(event.target.value)}>
+                  <option value="saved">Tarjeta guardada</option>
+                  <option value="temp">Tarjeta temporal</option>
+                </select>
+              </label>
+
+              {paymentMode === "saved" ? (
+                <>
+                  <label className="form-span-2">
+                    Selecciona una tarjeta
+                    <select value={selectedCardId} onChange={(event) => setSelectedCardId(event.target.value)} disabled={walletCards.length === 0}>
+                      <option value="">Selecciona...</option>
+                      {walletCards.map((card) => (
+                        <option key={card.id} value={card.id}>
+                          {card.brand} · {card.masked} · {String(card.exp_month).padStart(2, "0")}/{card.exp_year}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {walletCards.length === 0 ? (
+                    <div className="form-span-2">
+                      <p className="muted">No tienes tarjetas guardadas. Usa una tarjeta temporal o agrega una en tu perfil.</p>
+                      <button className="ghost-button" type="button" onClick={() => navigate("/my-profile#tarjetas")}>
+                        Ir a mis tarjetas
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="form-span-2">
+                      <span>Tarjeta seleccionada</span>
+                      <strong>{selectedCard ? `${selectedCard.brand} · ${selectedCard.masked}` : "-"}</strong>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <label className="form-span-2">
+                    Numero de tarjeta
+                    <div className="input-prefix-field">
+                      <span className="input-prefix-label">{tempCardBrandLabel}</span>
+                      <input
+                        value={tempCardNumber}
+                        onChange={(event) => setTempCardNumber(event.target.value.replace(/[^\d\s]/g, ""))}
+                        placeholder="0000 0000 0000 0000"
+                      />
+                    </div>
+                  </label>
+                  <label>
+                    Mes
+                    <input value={tempExpMonth} onChange={(event) => setTempExpMonth(event.target.value)} placeholder="12" />
+                  </label>
+                  <label>
+                    Año
+                    <input value={tempExpYear} onChange={(event) => setTempExpYear(event.target.value)} placeholder="2029" />
+                  </label>
+                  <label className="form-span-2">
+                    Titular
+                    <input value={tempHolderName} onChange={(event) => setTempHolderName(event.target.value)} placeholder="Nombre Apellido" />
+                  </label>
+                  <label>
+                    CVV
+                    <input value={tempCvv} onChange={(event) => setTempCvv(event.target.value)} placeholder="123" />
+                  </label>
+                  <label className="form-span-2 checkbox-row">
+                    <input type="checkbox" checked={tempSaveToWallet} onChange={(event) => setTempSaveToWallet(event.target.checked)} />
+                    Guardar esta tarjeta en mi perfil (opcional)
+                  </label>
+                </>
+              )}
+
+              <label>
+                Simulacion
+                <select value={simulateOutcome} onChange={(event) => setSimulateOutcome(event.target.value)}>
+                  <option value="approved">Aprobado</option>
+                  <option value="declined">Rechazado</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="checkout-actions">
+              <button className="ghost-button" type="button" onClick={() => navigate("/my-tickets")}>
+                Volver
+              </button>
+              <button className="primary-button" type="button" onClick={handlePay} disabled={isPaying}>
+                {isPaying ? "Procesando..." : "Confirmar pago"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function CustomerTicketsPage({ auth }) {
   const [reservations, setReservations] = useState([]);
-  const [feedback, setFeedback] = useState("");
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [cancellingId, setCancellingId] = useState(null);
+  const [requestingRefundId, setRequestingRefundId] = useState(null);
+  const [isDownloadingTicketsPdf, setIsDownloadingTicketsPdf] = useState(false);
   const [expandedReservationId, setExpandedReservationId] = useState(null);
   const [previewReservationId, setPreviewReservationId] = useState(null);
+  const [activeReservationGroup, setActiveReservationGroup] = useState("all");
+  const [issuedTickets, setIssuedTickets] = useState([]);
+  const [isLoadingIssuedTickets, setIsLoadingIssuedTickets] = useState(false);
+  const [issuedTicketsQrMap, setIssuedTicketsQrMap] = useState({});
 
   const loadReservations = useCallback(
     async ({ silent = false } = {}) => {
@@ -3783,15 +5720,18 @@ function CustomerTicketsPage({ auth }) {
         });
 
         setReservations(response.data || []);
-        setFeedback("");
+        setFeedback({ type: "", message: "" });
       } catch (error) {
         if (isServiceUnavailableError(error)) {
-          setFeedback("");
+          setFeedback({ type: "", message: "" });
           await auth.checkServer();
           return;
         }
 
-        setFeedback(getUserFacingErrorMessage(error, "No pudimos cargar tus reservas en este momento."));
+        setFeedback({
+          type: "error",
+          message: getUserFacingErrorMessage(error, "No pudimos cargar tus reservas en este momento."),
+        });
       } finally {
         setIsLoading(false);
         setIsRefreshing(false);
@@ -3814,14 +5754,175 @@ function CustomerTicketsPage({ auth }) {
     });
   }, [reservations]);
 
+  const reservationGroupCounts = useMemo(() => {
+    const counts = {
+      all: orderedReservations.length,
+      confirmed: 0,
+      pending: 0,
+      cancelled: 0,
+      expired: 0,
+    };
+
+    orderedReservations.forEach((reservation) => {
+      if (isExpiredReservation(reservation)) {
+        counts.expired += 1;
+        return;
+      }
+
+      if (reservation.status === "confirmed") {
+        counts.confirmed += 1;
+        return;
+      }
+
+      if (reservation.status === "pending_payment") {
+        counts.pending += 1;
+        return;
+      }
+
+      if (reservation.status === "cancelled") {
+        counts.cancelled += 1;
+      }
+    });
+
+    return counts;
+  }, [orderedReservations]);
+
+  const filteredReservations = useMemo(() => {
+    if (activeReservationGroup === "confirmed") {
+      return orderedReservations.filter((reservation) => reservation.status === "confirmed" && !isExpiredReservation(reservation));
+    }
+
+    if (activeReservationGroup === "pending") {
+      return orderedReservations.filter(
+        (reservation) => reservation.status === "pending_payment" && !isExpiredReservation(reservation)
+      );
+    }
+
+    if (activeReservationGroup === "cancelled") {
+      return orderedReservations.filter((reservation) => reservation.status === "cancelled");
+    }
+
+    if (activeReservationGroup === "expired") {
+      return orderedReservations.filter((reservation) => isExpiredReservation(reservation));
+    }
+
+    return orderedReservations;
+  }, [activeReservationGroup, orderedReservations]);
+
   const previewReservation = useMemo(
     () => orderedReservations.find((reservation) => reservation.id === previewReservationId) || null,
     [orderedReservations, previewReservationId]
   );
+  const previewHasIssuedAccess = hasIssuedReservationAccess(previewReservation);
+  const previewPrimaryTicketKey = useMemo(() => {
+    const firstTicket = issuedTickets[0];
+    if (!firstTicket) {
+      return "";
+    }
+    return firstTicket?.id ? String(firstTicket.id) : String(firstTicket?.ticket_code || firstTicket?.qr_code || "");
+  }, [issuedTickets]);
+  const previewPrimaryTicketQr = previewPrimaryTicketKey ? issuedTicketsQrMap[previewPrimaryTicketKey] : "";
+
+  useEffect(() => {
+    if (!previewReservationId || !previewHasIssuedAccess || !auth.token) {
+      setIssuedTickets([]);
+      setIssuedTicketsQrMap({});
+      setIsLoadingIssuedTickets(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsLoadingIssuedTickets(true);
+
+    apiRequest(`/reservations/${previewReservationId}/issued-tickets`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${auth.token}`,
+      },
+    })
+      .then((response) => {
+        if (isCancelled) {
+          return;
+        }
+        const nextTickets = response?.data?.issuedTickets;
+        setIssuedTickets(Array.isArray(nextTickets) ? nextTickets : []);
+      })
+      .catch((error) => {
+        if (isCancelled) {
+          return;
+        }
+        setIssuedTickets([]);
+        setIssuedTicketsQrMap({});
+        setFeedback({
+          type: "error",
+          message: getUserFacingErrorMessage(error, "No pudimos cargar los codigos de tus entradas."),
+        });
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingIssuedTickets(false);
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [auth.token, previewHasIssuedAccess, previewReservationId]);
+
+  useEffect(() => {
+    if (!issuedTickets.length) {
+      setIssuedTicketsQrMap({});
+      return;
+    }
+
+    let isCancelled = false;
+
+    const buildQrMap = async () => {
+      const nextMap = {};
+
+      for (const ticket of issuedTickets) {
+        const key = ticket?.id ? String(ticket.id) : String(ticket?.ticket_code || ticket?.qr_code || "");
+        if (!key) {
+          continue;
+        }
+
+        const payload = String(ticket?.qr_code || ticket?.ticket_code || "");
+        if (!payload) {
+          continue;
+        }
+
+        const dataUrl = await QRCode.toDataURL(payload, { errorCorrectionLevel: "M", margin: 1, width: 220 });
+        nextMap[key] = dataUrl;
+      }
+
+      if (!isCancelled) {
+        setIssuedTicketsQrMap(nextMap);
+      }
+    };
+
+    buildQrMap().catch(() => {
+      if (!isCancelled) {
+        setIssuedTicketsQrMap({});
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [issuedTickets]);
+
+  useEffect(() => {
+    if (expandedReservationId && !filteredReservations.some((reservation) => reservation.id === expandedReservationId)) {
+      setExpandedReservationId(null);
+    }
+    if (previewReservationId && !filteredReservations.some((reservation) => reservation.id === previewReservationId)) {
+      setPreviewReservationId(null);
+    }
+  }, [expandedReservationId, filteredReservations, previewReservationId]);
 
   const cancelReservation = async (reservationId) => {
     setCancellingId(reservationId);
-    setFeedback("");
+    setFeedback({ type: "", message: "" });
 
     try {
       await apiRequest(`/reservations/${reservationId}/cancel`, {
@@ -3833,9 +5934,104 @@ function CustomerTicketsPage({ auth }) {
 
       await loadReservations({ silent: true });
     } catch (error) {
-      setFeedback(getUserFacingErrorMessage(error, "No pudimos cancelar tu reserva en este momento."));
+      setFeedback({
+        type: "error",
+        message: getUserFacingErrorMessage(error, "No pudimos cancelar tu reserva en este momento."),
+      });
     } finally {
       setCancellingId(null);
+    }
+  };
+
+  const requestRefund = async (reservation) => {
+    const reservationId = reservation?.id;
+    if (!reservationId) {
+      return;
+    }
+
+    const paymentSnapshot = reservation?.card_snapshot_masked || formatPaymentMethodLabel(reservation?.payment_method);
+    const confirmation = window.confirm(
+      `Solicitud de reembolso por seguro\n\n` +
+        `El monto de ${formatCurrency(reservation?.total_amount)} sera devuelto a su metodo de pago de origen: ${paymentSnapshot}\n\n` +
+        `Evento: ${reservation?.event_title || `Evento #${reservation?.event_id || ""}`}\n` +
+        `Fecha del evento: ${formatDate(reservation?.event_starts_at)}\n\n` +
+        `Deseas continuar?`
+    );
+
+    if (!confirmation) {
+      return;
+    }
+
+    setRequestingRefundId(reservationId);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      await apiRequest(`/reservations/${reservationId}/refund/force-majeure/request`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setFeedback({
+        type: "success",
+        message: "Solicitud de reembolso enviada. Te notificaremos cuando se procese.",
+      });
+      await loadReservations({ silent: true });
+    } catch (error) {
+      setFeedback({
+        type: "error",
+        message: getUserFacingErrorMessage(error, "No pudimos registrar tu solicitud de reembolso."),
+      });
+    } finally {
+      setRequestingRefundId(null);
+    }
+  };
+
+  const downloadIssuedTicketsPdf = async () => {
+    if (!auth.token || !previewReservationId) {
+      return;
+    }
+
+    setIsDownloadingTicketsPdf(true);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/reservations/${previewReservationId}/tickets/pdf`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      if (!response.ok) {
+        let message = "No pudimos descargar el PDF de tus entradas.";
+        try {
+          const payload = await response.json();
+          message = payload?.message || message;
+        } catch {
+          message = String(message);
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const safeCode = previewReservation?.reservation_code || `RES-${previewReservationId}`;
+      link.download = `crowdpass-${safeCode}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setFeedback({
+        type: "error",
+        message: getUserFacingErrorMessage(error, "No pudimos descargar el PDF de tus entradas."),
+      });
+    } finally {
+      setIsDownloadingTicketsPdf(false);
     }
   };
 
@@ -3852,54 +6048,132 @@ function CustomerTicketsPage({ auth }) {
         </div>
       </header>
 
-      {feedback ? <InlineMessage type="error" message={feedback} /> : null}
+      {feedback.message ? <InlineMessage type={feedback.type || "error"} message={feedback.message} /> : null}
 
       <div className="dashboard-stack">
         <section className="panel-card">
-            <div className="panel-card-header">
-              <div>
-                <h3>Mis entradas</h3>
-                <p className="muted">Abre cada compra para ver la entrada digital y el detalle del pedido.</p>
-              </div>
+          <div className="panel-card-header">
+            <div>
+              <h3>Mis entradas</h3>
+              <p className="muted">Abre cada compra para ver la entrada digital y el detalle del pedido.</p>
             </div>
+          </div>
 
-            {isLoading ? <p className="muted">Cargando reservas...</p> : null}
+          {isLoading ? <p className="muted">Cargando reservas...</p> : null}
 
-            {!isLoading && reservations.length === 0 ? (
-              <div className="empty-state compact-state">
-                <h3>Aun no tienes entradas</h3>
-                <p className="muted">Cuando completes una compra, aqui aparecera tu entrada digital y el detalle del evento.</p>
+          {!isLoading && reservations.length === 0 ? (
+            <div className="empty-state compact-state">
+              <h3>Aun no tienes entradas</h3>
+              <p className="muted">Cuando completes una compra, aqui aparecera tu entrada digital y el detalle del evento.</p>
+            </div>
+          ) : null}
+
+          <div className="ticket-stack">
+            {!isLoading && reservations.length > 0 ? (
+              <div className="market-filter-pill-row">
+                <button
+                  className={`market-filter-pill ${activeReservationGroup === "all" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setActiveReservationGroup("all")}
+                >
+                  {`Todas (${reservationGroupCounts.all})`}
+                </button>
+                <button
+                  className={`market-filter-pill ${activeReservationGroup === "confirmed" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setActiveReservationGroup("confirmed")}
+                >
+                  {`Confirmadas (${reservationGroupCounts.confirmed})`}
+                </button>
+                <button
+                  className={`market-filter-pill ${activeReservationGroup === "pending" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setActiveReservationGroup("pending")}
+                >
+                  {`Pendientes (${reservationGroupCounts.pending})`}
+                </button>
+                <button
+                  className={`market-filter-pill ${activeReservationGroup === "cancelled" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setActiveReservationGroup("cancelled")}
+                >
+                  {`Canceladas (${reservationGroupCounts.cancelled})`}
+                </button>
+                <button
+                  className={`market-filter-pill ${activeReservationGroup === "expired" ? "active" : ""}`}
+                  type="button"
+                  onClick={() => setActiveReservationGroup("expired")}
+                >
+                  {`Expiradas (${reservationGroupCounts.expired})`}
+                </button>
               </div>
             ) : null}
 
-            <div className="ticket-stack">
-              {orderedReservations.map((reservation, index) => {
-                const isExpanded = expandedReservationId === reservation.id;
-                const isCancellable = reservation.status === "confirmed" || reservation.status === "pending_payment";
-                const reservationItems = Array.isArray(reservation.items) ? reservation.items : [];
+            {!isLoading && reservations.length > 0 && filteredReservations.length === 0 ? (
+              <div className="empty-state compact-state">
+                <h3>No hay entradas en este estado</h3>
+                <p className="muted">Prueba seleccionando otra categoria para ver tus reservas.</p>
+              </div>
+            ) : null}
 
-                return (
+            {filteredReservations.map((reservation, index) => {
+              const isExpanded = expandedReservationId === reservation.id;
+              const isCancellable = reservation.status === "pending_payment";
+              const hasIssuedAccess = hasIssuedReservationAccess(reservation);
+              const reservationItems = Array.isArray(reservation.items) ? reservation.items : [];
+              const startsAtMs = reservation.event_starts_at ? new Date(reservation.event_starts_at).getTime() : Number.NaN;
+              const hoursUntilEvent = Number.isFinite(startsAtMs) ? (startsAtMs - Date.now()) / (1000 * 60 * 60) : Number.NaN;
+              const isRefundWindowOpen = Number.isFinite(hoursUntilEvent) && hoursUntilEvent >= 24;
+              const canRequestRefund =
+                Boolean(reservation.is_refundable_purchase) &&
+                reservation.status === "confirmed" &&
+                hasIssuedAccess &&
+                isRefundWindowOpen &&
+                !["pending", "processing"].includes(reservation.refund_status);
+              const refundDisabledReason = !reservation.is_refundable_purchase
+                ? "Disponible solo si compraste el seguro reembolsable."
+                : !isRefundWindowOpen
+                  ? "Disponible solo si faltan 24 horas o mas para el evento."
+                  : ["pending", "processing"].includes(reservation.refund_status)
+                    ? "Ya existe una solicitud de reembolso en proceso."
+                  : "";
+
+              return (
                 <article className="ticket-card" key={reservation.id}>
                   <div className="ticket-card-media">
                     <img src={EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]} alt={reservation.event_title || `Evento ${reservation.event_id}`} />
                   </div>
                   <div className="ticket-card-body">
                     <div className="ticket-card-top">
-                      <span className={`status-pill ${reservation.status}`}>{getReservationStatusLabel(reservation.status)}</span>
+                      <span className={`status-pill ${reservation.status}`}>{getReservationStatusLabel(reservation)}</span>
                       <span>{formatDate(reservation.event_starts_at)}</span>
                     </div>
                     <h3>{reservation.event_title || `Evento #${reservation.event_id}`}</h3>
                     <p className="muted">
                       Reserva {reservation.reservation_code || `#${reservation.id}`} · {reservation.quantity} entrada(s)
                     </p>
+                    {reservation.status === "pending_payment" ? (
+                      <p className="muted">
+                        Tu stock quedo reservado temporalmente. La entrada digital se habilitara cuando el pago se confirme.
+                      </p>
+                    ) : null}
+                    {reservation.status === "pending_payment" && reservation.expires_at ? (
+                      <p className="muted">Vence: {formatDate(reservation.expires_at)}</p>
+                    ) : null}
+                    {isExpiredReservation(reservation) ? (
+                      <p className="muted">La reserva expiro y el stock fue liberado automaticamente.</p>
+                    ) : null}
+                    {reservation.refund_type === "refundable_purchase" && reservation.refund_status === "rejected" ? (
+                      <p className="muted">{`Solicitud de reembolso rechazada: ${reservation.refund_notes || "Sin detalle disponible."}`}</p>
+                    ) : null}
                     <div className="ticket-card-footer compact-footer customer-ticket-footer">
                       <div>
-                        <span>Total pagado</span>
+                        <span>{hasIssuedAccess ? "Total pagado" : "Total reservado"}</span>
                         <strong>{formatCurrency(reservation.total_amount)}</strong>
                       </div>
                       <div>
                         <span>Pago</span>
-                        <strong>{formatPaymentStatusLabel(reservation.payment_status)}</strong>
+                        <strong>{getReservationPaymentStatusLabel(reservation)}</strong>
                       </div>
                       <div>
                         <span>Metodo</span>
@@ -3908,7 +6182,7 @@ function CustomerTicketsPage({ auth }) {
                     </div>
                     <div className="ticket-card-actions">
                       <button className="primary-button inline-action" type="button" onClick={() => setPreviewReservationId(reservation.id)}>
-                        Ver entrada
+                        {hasIssuedAccess ? "Ver entrada" : "Ver resumen"}
                       </button>
                       <button
                         className="secondary-button inline-action"
@@ -3917,6 +6191,17 @@ function CustomerTicketsPage({ auth }) {
                       >
                         {isExpanded ? "Ocultar detalle" : "Ver detalle"}
                       </button>
+                      {reservation.status === "confirmed" ? (
+                        <button
+                          className="ghost-button inline-action"
+                          type="button"
+                          disabled={!canRequestRefund || requestingRefundId === reservation.id}
+                          title={canRequestRefund ? "" : refundDisabledReason}
+                          onClick={() => requestRefund(reservation)}
+                        >
+                          {requestingRefundId === reservation.id ? "Solicitando..." : "Solicitar reembolso"}
+                        </button>
+                      ) : null}
                       {isCancellable ? (
                         <button
                           className="ghost-button inline-action"
@@ -3942,7 +6227,17 @@ function CustomerTicketsPage({ auth }) {
                           </div>
                           <div>
                             <span>Estado del pago</span>
-                            <strong>{formatPaymentStatusLabel(reservation.payment_status)}</strong>
+                            <strong>{getReservationPaymentStatusLabel(reservation)}</strong>
+                          </div>
+                          <div>
+                            <span>Vigencia</span>
+                            <strong>
+                              {reservation.expires_at
+                                ? isExpiredReservation(reservation)
+                                  ? `Expirada el ${formatDate(reservation.expired_at || reservation.expires_at)}`
+                                  : `Hasta ${formatDate(reservation.expires_at)}`
+                                : "Sin limite"}
+                            </strong>
                           </div>
                           <div>
                             <span>Cuotas</span>
@@ -3986,9 +6281,9 @@ function CustomerTicketsPage({ auth }) {
                     ) : null}
                   </div>
                 </article>
-                );
-              })}
-            </div>
+              );
+            })}
+          </div>
         </section>
       </div>
 
@@ -4002,22 +6297,77 @@ function CustomerTicketsPage({ auth }) {
             <div className="panel-card ticket-preview-card">
               <div className="ticket-preview-header">
                 <div>
-                  <p className="eyebrow">Entrada digital</p>
+                  <p className="eyebrow">{previewHasIssuedAccess ? "Entrada digital" : "Resumen de reserva"}</p>
                   <h3>{previewReservation.event_title || `Evento #${previewReservation.event_id}`}</h3>
                   <p className="muted">{formatDate(previewReservation.event_starts_at)}</p>
                 </div>
-                <button className="ghost-button" type="button" onClick={() => setPreviewReservationId(null)}>
-                  Cerrar
-                </button>
+                <div className="cta-row compact-actions">
+                  {previewHasIssuedAccess ? (
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={isDownloadingTicketsPdf}
+                      onClick={downloadIssuedTicketsPdf}
+                    >
+                      {isDownloadingTicketsPdf ? "Descargando..." : "Descargar PDF"}
+                    </button>
+                  ) : null}
+                  <button className="ghost-button" type="button" onClick={() => setPreviewReservationId(null)}>
+                    Cerrar
+                  </button>
+                </div>
               </div>
 
               <div className="ticket-preview-body">
                 <div className="ticket-qr-card">
-                  <div className="ticket-qr-placeholder" aria-hidden="true">
-                    <span>QR</span>
-                  </div>
+                  {previewHasIssuedAccess ? (
+                    isLoadingIssuedTickets ? (
+                      <div className="ticket-qr-placeholder" aria-hidden="true">
+                        <span>QR</span>
+                      </div>
+                    ) : previewPrimaryTicketQr ? (
+                      <img className="ticket-qr-image" src={previewPrimaryTicketQr} alt="Codigo QR de acceso" />
+                    ) : (
+                      <div className="ticket-qr-placeholder" aria-hidden="true">
+                        <span>QR</span>
+                      </div>
+                    )
+                  ) : (
+                    <div className="ticket-qr-placeholder" aria-hidden="true">
+                      <span>RES</span>
+                    </div>
+                  )}
                   <strong>{previewReservation.reservation_code || `RES-${previewReservation.id}`}</strong>
-                  <span>Codigo digital de acceso</span>
+                  <span>{previewHasIssuedAccess ? "Codigo digital de acceso" : "Reserva aun pendiente de pago"}</span>
+                  {previewHasIssuedAccess ? (
+                    isLoadingIssuedTickets ? (
+                      <p className="muted">Generando codigos QR...</p>
+                    ) : issuedTickets.length ? (
+                      <div className="ticket-qr-list">
+                        {issuedTickets.map((ticket) => {
+                          const key = ticket?.id ? String(ticket.id) : String(ticket?.ticket_code || ticket?.qr_code || "");
+                          const qrUrl = key ? issuedTicketsQrMap[key] : "";
+                          return (
+                            <div className="ticket-qr-list-item" key={`qr-${key || ticket.ticket_code}`}>
+                              {qrUrl ? (
+                                <img className="ticket-qr-thumb" src={qrUrl} alt={`QR ${ticket.ticket_code}`} />
+                              ) : (
+                                <div className="ticket-qr-placeholder small" aria-hidden="true">
+                                  <span>QR</span>
+                                </div>
+                              )}
+                              <div>
+                                <strong>{ticket.ticket_code || "Entrada"}</strong>
+                                <span className="muted">{ticket.status || "active"}</span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="muted">Aun no hay entradas emitidas.</p>
+                    )
+                  ) : null}
                 </div>
 
                 <div className="ticket-preview-meta">
@@ -4026,7 +6376,7 @@ function CustomerTicketsPage({ auth }) {
                     <strong>{previewReservation.quantity}</strong>
                   </div>
                   <div>
-                    <span>Total pagado</span>
+                    <span>{previewHasIssuedAccess ? "Total pagado" : "Total reservado"}</span>
                     <strong>{formatCurrency(previewReservation.total_amount)}</strong>
                   </div>
                   <div>
@@ -4035,7 +6385,11 @@ function CustomerTicketsPage({ auth }) {
                   </div>
                   <div>
                     <span>Estado</span>
-                    <strong>{getReservationStatusLabel(previewReservation.status)}</strong>
+                    <strong>{getReservationStatusLabel(previewReservation)}</strong>
+                  </div>
+                  <div>
+                    <span>Pago</span>
+                    <strong>{getReservationPaymentStatusLabel(previewReservation)}</strong>
                   </div>
                 </div>
               </div>
@@ -4050,6 +6404,19 @@ function CustomerTicketsPage({ auth }) {
 function CustomerProfilePage({ auth }) {
   const [profileFeedback, setProfileFeedback] = useState({ type: "", message: "" });
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isRequestingOrganizer, setIsRequestingOrganizer] = useState(false);
+  const [walletCards, setWalletCards] = useState([]);
+  const [walletFeedback, setWalletFeedback] = useState({ type: "", message: "" });
+  const [isLoadingWallet, setIsLoadingWallet] = useState(false);
+  const [isSavingWalletCard, setIsSavingWalletCard] = useState(false);
+  const [walletCardForm, setWalletCardForm] = useState({
+    brand: "VISA",
+    cardNumber: "",
+    expMonth: "",
+    expYear: "",
+    holderName: "",
+    isDefault: true,
+  });
   const [profileForm, setProfileForm] = useState({
     fullName: "",
     country: "Peru",
@@ -4071,6 +6438,119 @@ function CustomerProfilePage({ auth }) {
       acceptsMarketing: Boolean(auth.currentUser?.accepts_marketing),
     });
   }, [auth.currentUser]);
+
+  const loadWalletCards = useCallback(async () => {
+    if (!auth.token || !["customer", "client"].includes(auth.currentUser?.role)) {
+      return;
+    }
+
+    setIsLoadingWallet(true);
+    setWalletFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/wallet/cards", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setWalletCards(Array.isArray(response.data) ? response.data : []);
+    } catch (error) {
+      setWalletFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos cargar tus tarjetas.") });
+    } finally {
+      setIsLoadingWallet(false);
+    }
+  }, [auth.currentUser?.role, auth.token]);
+
+  useEffect(() => {
+    loadWalletCards();
+  }, [loadWalletCards]);
+
+  const registerWalletCard = async (event) => {
+    event.preventDefault();
+    if (!auth.token) {
+      return;
+    }
+
+    setIsSavingWalletCard(true);
+    setWalletFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/wallet/cards", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({
+          brand: walletCardForm.brand,
+          cardNumber: walletCardForm.cardNumber,
+          expMonth: walletCardForm.expMonth,
+          expYear: walletCardForm.expYear,
+          holderName: walletCardForm.holderName,
+          isDefault: Boolean(walletCardForm.isDefault),
+        }),
+      });
+
+      setWalletCardForm((prev) => ({ ...prev, cardNumber: "" }));
+      setWalletFeedback({ type: "success", message: response.message });
+      await loadWalletCards();
+    } catch (error) {
+      setWalletFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos registrar la tarjeta.") });
+    } finally {
+      setIsSavingWalletCard(false);
+    }
+  };
+
+  const setDefaultWalletCard = async (cardId) => {
+    if (!auth.token) {
+      return;
+    }
+
+    setIsSavingWalletCard(true);
+    setWalletFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest(`/wallet/cards/${cardId}/default`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setWalletFeedback({ type: "success", message: response.message });
+      await loadWalletCards();
+    } catch (error) {
+      setWalletFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos actualizar tu tarjeta predeterminada.") });
+    } finally {
+      setIsSavingWalletCard(false);
+    }
+  };
+
+  const deleteWalletCard = async (cardId) => {
+    if (!auth.token) {
+      return;
+    }
+
+    setIsSavingWalletCard(true);
+    setWalletFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest(`/wallet/cards/${cardId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      setWalletFeedback({ type: "success", message: response.message });
+      await loadWalletCards();
+    } catch (error) {
+      setWalletFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos eliminar la tarjeta.") });
+    } finally {
+      setIsSavingWalletCard(false);
+    }
+  };
 
   const saveProfile = async (event) => {
     event.preventDefault();
@@ -4101,6 +6581,33 @@ function CustomerProfilePage({ auth }) {
     }
   };
 
+  const requestOrganizerRole = async () => {
+    setIsRequestingOrganizer(true);
+    setProfileFeedback({ type: "", message: "" });
+
+    try {
+      const response = await apiRequest("/users/me/request-organizer", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      auth.saveSession(auth.token, response.data);
+      setProfileFeedback({ type: "success", message: response.message });
+    } catch (error) {
+      setProfileFeedback({
+        type: "error",
+        message: getUserFacingErrorMessage(error, "No pudimos enviar tu solicitud en este momento."),
+      });
+    } finally {
+      setIsRequestingOrganizer(false);
+    }
+  };
+
+  const canRequestOrganizerRole =
+    auth.currentUser?.role === "customer" && auth.currentUser?.organizer_status !== "approved";
+
   return (
     <section className="page-section dashboard-page customer-profile-page">
       <div className="profile-settings-layout">
@@ -4110,6 +6617,7 @@ function CustomerProfilePage({ auth }) {
             <a className="active" href="#perfil">
               Mi perfil
             </a>
+            <a href="#tarjetas">Mis tarjetas</a>
             <a href="#cuenta">Cuenta</a>
           </nav>
         </aside>
@@ -4185,6 +6693,80 @@ function CustomerProfilePage({ auth }) {
             </form>
           </section>
 
+          <section className="panel-card" id="tarjetas">
+            <div className="panel-card-header">
+              <div>
+                <h3>Mis tarjetas</h3>
+                <p className="muted">Guarda métodos de pago simulados. Solo se almacenan los últimos 4 dígitos.</p>
+              </div>
+            </div>
+
+            {walletFeedback.message ? <InlineMessage type={walletFeedback.type} message={walletFeedback.message} /> : null}
+
+            <div className="ticket-item-list">
+              {isLoadingWallet ? <p className="muted">Cargando tarjetas...</p> : null}
+              {!isLoadingWallet && walletCards.length === 0 ? <p className="muted">Aún no tienes tarjetas registradas.</p> : null}
+              {walletCards.map((card) => (
+                <div className="ticket-item-row" key={card.id}>
+                  <div>
+                    <strong>
+                      {card.brand} · {card.masked}
+                    </strong>
+                    <span>
+                      Expira {String(card.exp_month).padStart(2, "0")}/{card.exp_year} · {card.holder_name}
+                    </span>
+                  </div>
+                  <div className="ticket-card-actions">
+                    {card.is_default ? (
+                      <span className="table-status">Default</span>
+                    ) : (
+                      <button className="ghost-button" type="button" disabled={isSavingWalletCard} onClick={() => setDefaultWalletCard(card.id)}>
+                        Hacer default
+                      </button>
+                    )}
+                    <button className="ghost-button danger-button" type="button" disabled={isSavingWalletCard} onClick={() => deleteWalletCard(card.id)}>
+                      Eliminar
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <form className="form-grid compact-grid" onSubmit={registerWalletCard}>
+              <label>
+                Marca
+                <select value={walletCardForm.brand} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, brand: event.target.value }))}>
+                  <option value="VISA">VISA</option>
+                  <option value="MASTERCARD">MASTERCARD</option>
+                  <option value="AMEX">AMEX</option>
+                </select>
+              </label>
+              <label>
+                Numero
+                <input inputMode="numeric" value={walletCardForm.cardNumber} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, cardNumber: event.target.value }))} required />
+              </label>
+              <label>
+                Mes
+                <input inputMode="numeric" value={walletCardForm.expMonth} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, expMonth: event.target.value }))} placeholder="MM" required />
+              </label>
+              <label>
+                Año
+                <input inputMode="numeric" value={walletCardForm.expYear} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, expYear: event.target.value }))} placeholder="YYYY" required />
+              </label>
+              <label className="form-span-2">
+                Titular
+                <input value={walletCardForm.holderName} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, holderName: event.target.value }))} required />
+              </label>
+              <label className="checkbox-field form-span-2">
+                <input type="checkbox" checked={Boolean(walletCardForm.isDefault)} onChange={(event) => setWalletCardForm((prev) => ({ ...prev, isDefault: event.target.checked }))} />
+                <span>Marcar como predeterminada.</span>
+              </label>
+              <button className="primary-button" type="submit" disabled={isSavingWalletCard}>
+                {isSavingWalletCard ? "Registrando..." : "Registrar tarjeta"}
+              </button>
+            </form>
+          </section>
+
           <section className="panel-card account-danger-card" id="cuenta">
             <div className="panel-card-header">
               <div>
@@ -4202,8 +6784,1048 @@ function CustomerProfilePage({ auth }) {
               </button>
             </div>
           </section>
+
+          {canRequestOrganizerRole ? (
+            <section className="panel-card promo-card">
+              <div className="panel-card-header">
+                <div>
+                  <h3>Publica como organizer</h3>
+                  <p className="muted">Cuando tu perfil esté listo, solicita acceso para crear y gestionar tus eventos.</p>
+                </div>
+              </div>
+              <div className="account-danger-row organizer-request-row">
+                <div>
+                  <strong>
+                    {auth.currentUser?.organizer_status === "pending"
+                      ? "Solicitud pendiente de revisión"
+                      : "Solicitar acceso como organizer"}
+                  </strong>
+                  <p className="muted">
+                    {auth.currentUser?.organizer_status === "pending"
+                      ? "Tu solicitud ya fue enviada. Un administrador la revisará antes de habilitar tu panel."
+                      : "Una vez aprobada, verás el panel de organizer para crear eventos, tickets y publicaciones."}
+                  </p>
+                </div>
+                <button
+                  className="primary-button inline-action"
+                  type="button"
+                  disabled={isRequestingOrganizer || auth.currentUser?.organizer_status === "pending"}
+                  onClick={requestOrganizerRole}
+                >
+                  {auth.currentUser?.organizer_status === "pending"
+                    ? "Solicitud pendiente"
+                    : isRequestingOrganizer
+                      ? "Enviando..."
+                      : "Solicitar acceso"}
+                </button>
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
+    </section>
+  );
+}
+
+function StaffReservationsPage({ auth }) {
+  const [reservations, setReservations] = useState([]);
+  const [feedback, setFeedback] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [previewReservationId, setPreviewReservationId] = useState(null);
+
+  const loadReservations = useCallback(
+    async ({ silent = false } = {}) => {
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
+
+      try {
+        const response = await apiRequest("/reservations", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        });
+
+        setReservations(response.data || []);
+        setFeedback("");
+      } catch (error) {
+        setFeedback(getUserFacingErrorMessage(error, "No pudimos cargar las reservas operativas en este momento."));
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    },
+    [auth.token]
+  );
+
+  useEffect(() => {
+    loadReservations();
+  }, [loadReservations]);
+
+  useAutoRefresh(() => loadReservations({ silent: true }), RESERVATIONS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  const orderedReservations = useMemo(() => {
+    return [...reservations].sort((left, right) => {
+      const leftDate = left.reserved_at ? new Date(left.reserved_at).getTime() : 0;
+      const rightDate = right.reserved_at ? new Date(right.reserved_at).getTime() : 0;
+      return rightDate - leftDate;
+    });
+  }, [reservations]);
+
+  const metrics = useMemo(() => {
+    return orderedReservations.reduce(
+      (summary, reservation) => {
+        summary.total += 1;
+
+        if (reservation.status === "confirmed") {
+          summary.confirmed += 1;
+        }
+
+        if (reservation.status === "pending_payment") {
+          summary.pending += 1;
+        }
+
+        if (isExpiredReservation(reservation)) {
+          summary.expired += 1;
+        }
+
+        return summary;
+      },
+      {
+        total: 0,
+        confirmed: 0,
+        pending: 0,
+        expired: 0,
+      }
+    );
+  }, [orderedReservations]);
+
+  const previewReservation = useMemo(
+    () => orderedReservations.find((reservation) => reservation.id === previewReservationId) || null,
+    [orderedReservations, previewReservationId]
+  );
+
+  return (
+    <section className="page-section dashboard-page customer-dashboard">
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Staff</p>
+          <h2>Monitoreo operativo de reservas</h2>
+          <p className="muted">Consulta el estado de las reservas del sistema sin exponer acciones de compra ni privilegios administrativos totales.</p>
+          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+        </div>
+      </header>
+
+      {feedback ? <InlineMessage type="error" message={feedback} /> : null}
+
+      <div className="metrics-grid">
+        <article className="metric-card highlight">
+          <span>Total reservas</span>
+          <strong>{metrics.total}</strong>
+          <small>Operaciones registradas</small>
+        </article>
+        <article className="metric-card">
+          <span>Confirmadas</span>
+          <strong>{metrics.confirmed}</strong>
+          <small>Con acceso emitido</small>
+        </article>
+        <article className="metric-card">
+          <span>Pendientes</span>
+          <strong>{metrics.pending}</strong>
+          <small>Esperando pago</small>
+        </article>
+        <article className="metric-card">
+          <span>Expiradas</span>
+          <strong>{metrics.expired}</strong>
+          <small>Stock ya liberado</small>
+        </article>
+      </div>
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Reservas recientes</h3>
+            <p className="muted">Vista operacional para seguimiento y soporte.</p>
+          </div>
+        </div>
+
+        {isLoading ? <p className="muted">Cargando reservas...</p> : null}
+
+        {!isLoading && orderedReservations.length === 0 ? (
+          <div className="empty-state compact-state">
+            <h3>No hay reservas registradas</h3>
+            <p className="muted">Cuando existan operaciones en el sistema apareceran aqui.</p>
+          </div>
+        ) : null}
+
+        {!isLoading && orderedReservations.length > 0 ? (
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Reserva</th>
+                  <th>Cliente</th>
+                  <th>Evento</th>
+                  <th>Estado</th>
+                  <th>Pago</th>
+                  <th>Total</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderedReservations.map((reservation) => (
+                  <tr key={reservation.id}>
+                    <td>{reservation.reservation_code || `#${reservation.id}`}</td>
+                    <td>
+                      <div className="summary-stat-list compact-summary">
+                        <div>
+                          <strong>{reservation.user_full_name || `Usuario #${reservation.user_id}`}</strong>
+                          <span>{reservation.user_email || "Correo no disponible"}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="summary-stat-list compact-summary">
+                        <div>
+                          <strong>{reservation.event_title || `Evento #${reservation.event_id}`}</strong>
+                          <span>{formatDate(reservation.event_starts_at)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`status-pill ${reservation.status}`}>{getReservationStatusLabel(reservation)}</span>
+                    </td>
+                    <td>{getReservationPaymentStatusLabel(reservation)}</td>
+                    <td>{formatCurrency(reservation.total_amount)}</td>
+                    <td>
+                      <button className="secondary-button inline-action" type="button" onClick={() => setPreviewReservationId(reservation.id)}>
+                        Ver detalle
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+
+      {previewReservation ? (
+        <div className="ticket-preview-overlay" role="presentation" onClick={(event) => {
+          if (event.target === event.currentTarget) {
+            setPreviewReservationId(null);
+          }
+        }}>
+          <div className="ticket-preview-dialog">
+            <div className="panel-card ticket-preview-card">
+              <div className="ticket-preview-header">
+                <div>
+                  <p className="eyebrow">Detalle operativo</p>
+                  <h3>{previewReservation.reservation_code || `RES-${previewReservation.id}`}</h3>
+                  <p className="muted">{previewReservation.user_full_name || `Usuario #${previewReservation.user_id}`}</p>
+                </div>
+                <button className="ghost-button" type="button" onClick={() => setPreviewReservationId(null)}>
+                  Cerrar
+                </button>
+              </div>
+
+              <div className="ticket-preview-body">
+                <div className="ticket-preview-meta">
+                  <div>
+                    <span>Evento</span>
+                    <strong>{previewReservation.event_title || `Evento #${previewReservation.event_id}`}</strong>
+                  </div>
+                  <div>
+                    <span>Fecha del evento</span>
+                    <strong>{formatDate(previewReservation.event_starts_at)}</strong>
+                  </div>
+                  <div>
+                    <span>Cliente</span>
+                    <strong>{previewReservation.user_email || "Correo no disponible"}</strong>
+                  </div>
+                  <div>
+                    <span>Estado</span>
+                    <strong>{getReservationStatusLabel(previewReservation)}</strong>
+                  </div>
+                  <div>
+                    <span>Pago</span>
+                    <strong>{getReservationPaymentStatusLabel(previewReservation)}</strong>
+                  </div>
+                  <div>
+                    <span>Total</span>
+                    <strong>{formatCurrency(previewReservation.total_amount)}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function StaffRefundsPage({ auth }) {
+  const [refundQueue, setRefundQueue] = useState([]);
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [processingReservationId, setProcessingReservationId] = useState(null);
+  const [activeRefundStatus, setActiveRefundStatus] = useState("pending");
+
+  const loadRefundQueue = useCallback(
+    async ({ silent = false } = {}) => {
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
+
+      try {
+        const response = await apiRequest("/reservations/refund-queue?refundType=refundable_purchase", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        });
+
+        setRefundQueue(Array.isArray(response.data) ? response.data : []);
+        setFeedback({ type: "", message: "" });
+      } catch (error) {
+        setFeedback({
+          type: "error",
+          message: getUserFacingErrorMessage(error, "No pudimos cargar la cola de reembolsos en este momento."),
+        });
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    },
+    [auth.token]
+  );
+
+  useEffect(() => {
+    loadRefundQueue();
+  }, [loadRefundQueue]);
+
+  useAutoRefresh(() => loadRefundQueue({ silent: true }), RESERVATIONS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  const refundStatusCounts = useMemo(() => {
+    return refundQueue.reduce(
+      (summary, item) => {
+        summary.all += 1;
+        if (["pending", "processing"].includes(item.refund_status)) {
+          summary.pending += 1;
+        }
+        if (item.refund_status === "rejected") {
+          summary.rejected += 1;
+        }
+        if (item.refund_status === "completed") {
+          summary.completed += 1;
+        }
+        return summary;
+      },
+      { all: 0, pending: 0, rejected: 0, completed: 0 }
+    );
+  }, [refundQueue]);
+
+  const filteredQueue = useMemo(() => {
+    if (activeRefundStatus === "pending") {
+      return refundQueue.filter((item) => ["pending", "processing"].includes(item.refund_status));
+    }
+    if (activeRefundStatus === "rejected") {
+      return refundQueue.filter((item) => item.refund_status === "rejected");
+    }
+    if (activeRefundStatus === "completed") {
+      return refundQueue.filter((item) => item.refund_status === "completed");
+    }
+    return refundQueue;
+  }, [activeRefundStatus, refundQueue]);
+
+  const orderedQueue = useMemo(() => {
+    return [...filteredQueue].sort((left, right) => {
+      const leftDate = left.refund_requested_at ? new Date(left.refund_requested_at).getTime() : 0;
+      const rightDate = right.refund_requested_at ? new Date(right.refund_requested_at).getTime() : 0;
+      return leftDate - rightDate;
+    });
+  }, [filteredQueue]);
+
+  const approveRefund = async (reservationId) => {
+    setProcessingReservationId(reservationId);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      await apiRequest(`/reservations/${reservationId}/refund/complete`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({ notes: "Aprobado por staff (seguro reembolsable)." }),
+      });
+
+      setFeedback({ type: "success", message: "Reembolso aprobado y procesado." });
+      await loadRefundQueue({ silent: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos aprobar el reembolso.") });
+    } finally {
+      setProcessingReservationId(null);
+    }
+  };
+
+  const rejectRefund = async (reservationId) => {
+    const notes = window.prompt("Motivo del rechazo (min 5 caracteres):", "");
+    if (!notes) {
+      return;
+    }
+
+    const normalizedNotes = String(notes).trim();
+    if (normalizedNotes.length < 5) {
+      setFeedback({ type: "error", message: "Debes indicar un motivo mas claro para rechazar el reembolso." });
+      return;
+    }
+
+    setProcessingReservationId(reservationId);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      await apiRequest(`/reservations/${reservationId}/refund/reject`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({ notes: normalizedNotes }),
+      });
+
+      setFeedback({ type: "success", message: "Reembolso rechazado." });
+      await loadRefundQueue({ silent: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos rechazar el reembolso.") });
+    } finally {
+      setProcessingReservationId(null);
+    }
+  };
+
+  return (
+    <section className="page-section dashboard-page customer-dashboard">
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Staff</p>
+          <h2>Reembolsos por seguro</h2>
+          <p className="muted">Aprueba solicitudes de reembolso hechas por clientes con seguro (antes de 24 horas del evento).</p>
+          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+        </div>
+      </header>
+
+      {feedback.message ? <InlineMessage type={feedback.type || "error"} message={feedback.message} /> : null}
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Cola de solicitudes</h3>
+            <p className="muted">Revisa solicitudes por seguro y aprueba o rechaza segun corresponda.</p>
+          </div>
+        </div>
+
+        {isLoading ? <p className="muted">Cargando cola...</p> : null}
+
+        {!isLoading && refundQueue.length > 0 ? (
+          <div className="market-filter-pill-row">
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "pending" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("pending")}
+            >
+              {`Pendientes (${refundStatusCounts.pending})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "rejected" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("rejected")}
+            >
+              {`Rechazadas (${refundStatusCounts.rejected})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "completed" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("completed")}
+            >
+              {`Completadas (${refundStatusCounts.completed})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "all" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("all")}
+            >
+              {`Todas (${refundStatusCounts.all})`}
+            </button>
+          </div>
+        ) : null}
+
+        {!isLoading && orderedQueue.length === 0 ? (
+          <div className="empty-state compact-state">
+            <h3>No hay solicitudes</h3>
+            <p className="muted">No hay registros para el filtro seleccionado.</p>
+          </div>
+        ) : null}
+
+        {!isLoading && orderedQueue.length > 0 ? (
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Reserva</th>
+                  <th>Cliente</th>
+                  <th>Evento</th>
+                  <th>Solicitado</th>
+                  <th>Estado</th>
+                  <th>Monto</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderedQueue.map((item) => (
+                  <tr key={`refund-${item.id}`}>
+                    <td>{item.reservation_code || `#${item.id}`}</td>
+                    <td>
+                      <div className="summary-stat-list compact-summary">
+                        <div>
+                          <strong>{item.user_full_name || `Usuario #${item.user_id}`}</strong>
+                          <span>{item.user_email || "Correo no disponible"}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="summary-stat-list compact-summary">
+                        <div>
+                          <strong>{item.event_title || `Evento #${item.event_id}`}</strong>
+                          <span>{formatDate(item.event_starts_at)}</span>
+                        </div>
+                      </div>
+                    </td>
+                    <td>{item.refund_requested_at ? formatDate(item.refund_requested_at) : "-"}</td>
+                    <td>{formatReservationRefundStatus(item.refund_status)}</td>
+                    <td>{formatCurrency(item.refund_amount || item.total_amount)}</td>
+                    <td>
+                      <div className="cta-row compact-actions">
+                        {["pending", "processing"].includes(item.refund_status) ? (
+                          <>
+                            <button
+                              className="primary-button inline-action"
+                              type="button"
+                              disabled={processingReservationId === item.id}
+                              onClick={() => approveRefund(item.id)}
+                            >
+                              {processingReservationId === item.id ? "Procesando..." : "Aprobar"}
+                            </button>
+                            <button
+                              className="ghost-button inline-action"
+                              type="button"
+                              disabled={processingReservationId === item.id}
+                              onClick={() => rejectRefund(item.id)}
+                            >
+                              Rechazar
+                            </button>
+                          </>
+                        ) : (
+                          <span className="muted">Sin acciones</span>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+    </section>
+  );
+}
+
+function StaffEventCancellationsPage({ auth }) {
+  const [items, setItems] = useState([]);
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadCancellations = useCallback(
+    async ({ silent = false } = {}) => {
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
+
+      try {
+        const response = await apiRequest("/events/cancellations?limit=20&page=1", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        });
+
+        setItems(Array.isArray(response.data) ? response.data : []);
+        setFeedback({ type: "", message: "" });
+      } catch (error) {
+        setFeedback({
+          type: "error",
+          message: getUserFacingErrorMessage(error, "No pudimos cargar las cancelaciones en este momento."),
+        });
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    },
+    [auth.token]
+  );
+
+  useEffect(() => {
+    loadCancellations();
+  }, [loadCancellations]);
+
+  useAutoRefresh(() => loadCancellations({ silent: true }), RESERVATIONS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  const orderedItems = useMemo(() => {
+    return [...items].sort((left, right) => {
+      const leftDate = left.cancelled_at ? new Date(left.cancelled_at).getTime() : 0;
+      const rightDate = right.cancelled_at ? new Date(right.cancelled_at).getTime() : 0;
+      return rightDate - leftDate;
+    });
+  }, [items]);
+
+  return (
+    <section className="page-section dashboard-page customer-dashboard">
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Staff</p>
+          <h2>Cancelaciones y reembolsos masivos</h2>
+          <p className="muted">Monitorea el progreso de reembolsos cuando un evento es cancelado.</p>
+          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+        </div>
+      </header>
+
+      {feedback.message ? <InlineMessage type={feedback.type || "error"} message={feedback.message} /> : null}
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Eventos cancelados</h3>
+            <p className="muted">El sistema procesa reembolsos en segundo plano en lotes.</p>
+          </div>
+        </div>
+
+        {isLoading ? <p className="muted">Cargando eventos cancelados...</p> : null}
+
+        {!isLoading && orderedItems.length === 0 ? (
+          <div className="empty-state compact-state">
+            <h3>No hay eventos cancelados</h3>
+            <p className="muted">Cuando se cancele un evento, aparecera aqui con su progreso de reembolso.</p>
+          </div>
+        ) : null}
+
+        {!isLoading && orderedItems.length > 0 ? (
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Evento</th>
+                  <th>Cancelado</th>
+                  <th>Pagos capturados</th>
+                  <th>Completados</th>
+                  <th>Pendientes</th>
+                  <th>Rechazados</th>
+                  <th>Progreso</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderedItems.map((eventItem) => {
+                  const captured = Number(eventItem.captured_reservations || 0);
+                  const completed = Number(eventItem.refunds_completed || 0);
+                  const pending = Number(eventItem.refunds_pending || 0) + Number(eventItem.refunds_processing || 0);
+                  const rejected = Number(eventItem.refunds_rejected || 0);
+                  const progress = captured ? Math.min(100, Math.round((completed / captured) * 100)) : 0;
+
+                  return (
+                    <tr key={`cancelled-${eventItem.id}`}>
+                      <td>
+                        <div className="summary-stat-list compact-summary">
+                          <div>
+                            <strong>
+                              <Link className="plain-link" to={`/staff/cancellations/${eventItem.id}`}>
+                                {eventItem.title || `Evento #${eventItem.id}`}
+                              </Link>
+                            </strong>
+                            <span>{[eventItem.city, eventItem.country].filter(Boolean).join(", ") || "Ubicacion no disponible"}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{eventItem.cancelled_at ? formatDate(eventItem.cancelled_at) : "-"}</td>
+                      <td>{captured}</td>
+                      <td>{completed}</td>
+                      <td>{pending}</td>
+                      <td>{rejected}</td>
+                      <td>{`${progress}%`}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+      </section>
+    </section>
+  );
+}
+
+function StaffEventCancellationDetailPage({ auth }) {
+  const { eventId } = useParams();
+  const [eventInfo, setEventInfo] = useState(null);
+  const [refundQueue, setRefundQueue] = useState([]);
+  const [activeRefundStatus, setActiveRefundStatus] = useState("rejected");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [feedback, setFeedback] = useState({ type: "", message: "" });
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [processingReservationId, setProcessingReservationId] = useState(null);
+  const [isRunningWorker, setIsRunningWorker] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasNextPage, setHasNextPage] = useState(false);
+
+  const loadData = useCallback(
+    async ({ silent = false, page = 1, append = false } = {}) => {
+      if (silent) {
+        setIsRefreshing(true);
+      } else {
+        setIsLoading(true);
+      }
+
+      try {
+        const [eventResponse, queueResponse] = await Promise.all([
+          apiRequest(`/events/${eventId}/communication-targets`, {
+            method: "GET",
+            headers: { Authorization: `Bearer ${auth.token}` },
+          }),
+          apiRequest(
+            `/reservations/refund-queue?eventId=${encodeURIComponent(eventId)}&refundType=event_cancelled&limit=200&page=${encodeURIComponent(
+              page
+            )}`,
+            {
+            method: "GET",
+            headers: { Authorization: `Bearer ${auth.token}` },
+            }
+          ),
+        ]);
+
+        setEventInfo(eventResponse.data?.event || null);
+        const nextItems = Array.isArray(queueResponse.data) ? queueResponse.data : [];
+        setRefundQueue((current) => (append ? [...current, ...nextItems] : nextItems));
+        setCurrentPage(page);
+        setHasNextPage(Boolean(queueResponse.meta?.hasNextPage));
+        setFeedback({ type: "", message: "" });
+      } catch (error) {
+        setFeedback({
+          type: "error",
+          message: getUserFacingErrorMessage(error, "No pudimos cargar el detalle de cancelacion."),
+        });
+      } finally {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    },
+    [auth.token, eventId]
+  );
+
+  useEffect(() => {
+    loadData({ page: 1, append: false });
+  }, [loadData]);
+
+  useAutoRefresh(() => loadData({ silent: true, page: 1, append: false }), RESERVATIONS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  const refundStatusCounts = useMemo(() => {
+    return refundQueue.reduce(
+      (summary, item) => {
+        summary.all += 1;
+        if (["pending", "processing"].includes(item.refund_status)) {
+          summary.pending += 1;
+        }
+        if (item.refund_status === "rejected") {
+          summary.rejected += 1;
+        }
+        if (item.refund_status === "completed") {
+          summary.completed += 1;
+        }
+        return summary;
+      },
+      { all: 0, pending: 0, rejected: 0, completed: 0 }
+    );
+  }, [refundQueue]);
+
+  const filteredQueue = useMemo(() => {
+    if (activeRefundStatus === "pending") {
+      return refundQueue.filter((item) => ["pending", "processing"].includes(item.refund_status));
+    }
+    if (activeRefundStatus === "rejected") {
+      return refundQueue.filter((item) => item.refund_status === "rejected");
+    }
+    if (activeRefundStatus === "completed") {
+      return refundQueue.filter((item) => item.refund_status === "completed");
+    }
+    return refundQueue;
+  }, [activeRefundStatus, refundQueue]);
+
+  const normalizedSearch = searchTerm.trim().toLowerCase();
+  const searchedQueue = useMemo(() => {
+    if (!normalizedSearch) {
+      return filteredQueue;
+    }
+
+    return filteredQueue.filter((item) => {
+      const haystack = [
+        item.reservation_code,
+        item.user_email,
+        item.user_full_name,
+        item.refund_notes,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(normalizedSearch);
+    });
+  }, [filteredQueue, normalizedSearch]);
+
+  const orderedQueue = useMemo(() => {
+    return [...searchedQueue].sort((left, right) => {
+      const leftDate = left.refund_requested_at ? new Date(left.refund_requested_at).getTime() : 0;
+      const rightDate = right.refund_requested_at ? new Date(right.refund_requested_at).getTime() : 0;
+      return leftDate - rightDate;
+    });
+  }, [searchedQueue]);
+
+  const retryRefund = async (reservationId) => {
+    const notes = window.prompt("Nota opcional para el reintento:", "");
+    setProcessingReservationId(reservationId);
+    setFeedback({ type: "", message: "" });
+
+    try {
+      await apiRequest(`/reservations/${reservationId}/refund/retry`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({ notes: notes ? String(notes).trim() : null }),
+      });
+
+      setFeedback({ type: "success", message: "Reembolso reprogramado. El worker lo procesara en breve." });
+      await loadData({ silent: true });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos reintentar el reembolso.") });
+    } finally {
+      setProcessingReservationId(null);
+    }
+  };
+
+  const retryRejectedBatch = async () => {
+    const confirmed = window.confirm("Se reintentaran reembolsos rechazados (hasta 50). Deseas continuar?");
+    if (!confirmed) {
+      return;
+    }
+
+    setFeedback({ type: "", message: "" });
+    try {
+      const response = await apiRequest(`/events/${eventId}/refunds/retry-rejected`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({ limit: 50, notes: "Reintento masivo solicitado por staff." }),
+      });
+
+      const updated = Number(response.data?.updated || 0);
+      setFeedback({ type: "success", message: `Reprogramados: ${updated}.` });
+      await loadData({ silent: true, page: 1, append: false });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos reprogramar reembolsos rechazados.") });
+    }
+  };
+
+  const runWorkerNow = async () => {
+    const rawLimit = window.prompt("Cuantos reembolsos quieres procesar ahora? (1-50)", "8");
+    if (rawLimit === null) {
+      return;
+    }
+
+    const normalizedLimit =
+      Number.isFinite(Number(rawLimit)) && Number(rawLimit) > 0 ? Math.min(Number(rawLimit), 50) : 8;
+
+    setIsRunningWorker(true);
+    setFeedback({ type: "", message: "" });
+    try {
+      const response = await apiRequest("/reservations/refund-worker/run", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${auth.token}` },
+        body: JSON.stringify({ limit: normalizedLimit }),
+      });
+
+      const claimed = Number(response.data?.claimed || 0);
+      const completed = Number(response.data?.completed || 0);
+      const rejected = Number(response.data?.rejected || 0);
+      setFeedback({
+        type: "success",
+        message: `Worker ejecutado. Tomados: ${claimed}, completados: ${completed}, rechazados: ${rejected}.`,
+      });
+      await loadData({ silent: true, page: 1, append: false });
+    } catch (error) {
+      setFeedback({ type: "error", message: getUserFacingErrorMessage(error, "No pudimos ejecutar el worker.") });
+    } finally {
+      setIsRunningWorker(false);
+    }
+  };
+
+  return (
+    <section className="page-section dashboard-page customer-dashboard">
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Staff</p>
+          <h2>{`Cancelacion: ${eventInfo?.title || `Evento #${eventId}`}`}</h2>
+          <p className="muted">Reintenta reembolsos rechazados y monitorea el avance del procesamiento masivo.</p>
+          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+        </div>
+      </header>
+
+      {feedback.message ? <InlineMessage type={feedback.type || "error"} message={feedback.message} /> : null}
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Reembolsos por cancelacion de evento</h3>
+            <p className="muted">Filtra por estado para ver pendientes, completados o rechazados.</p>
+          </div>
+          <div className="cta-row">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={isLoading || isRunningWorker}
+              onClick={runWorkerNow}
+            >
+              {isRunningWorker ? "Ejecutando worker..." : "Ejecutar worker ahora"}
+            </button>
+          </div>
+        </div>
+
+        {isLoading ? <p className="muted">Cargando...</p> : null}
+
+        {!isLoading && refundQueue.length > 0 ? (
+          <div className="market-filter-pill-row">
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "pending" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("pending")}
+            >
+              {`Pendientes (${refundStatusCounts.pending})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "rejected" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("rejected")}
+            >
+              {`Rechazados (${refundStatusCounts.rejected})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "completed" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("completed")}
+            >
+              {`Completados (${refundStatusCounts.completed})`}
+            </button>
+            <button
+              className={`market-filter-pill ${activeRefundStatus === "all" ? "active" : ""}`}
+              type="button"
+              onClick={() => setActiveRefundStatus("all")}
+            >
+              {`Todos (${refundStatusCounts.all})`}
+            </button>
+            {refundStatusCounts.rejected > 0 ? (
+              <button className="market-filter-pill" type="button" onClick={retryRejectedBatch}>
+                Reintentar rechazados
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {!isLoading && refundQueue.length > 0 ? (
+          <div className="market-filter-search-row">
+            <input
+              className="text-input"
+              placeholder="Buscar por reserva, correo o nota..."
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+            />
+          </div>
+        ) : null}
+
+        {!isLoading && orderedQueue.length === 0 ? (
+          <div className="empty-state compact-state">
+            <h3>No hay registros</h3>
+            <p className="muted">No hay reembolsos para el filtro seleccionado.</p>
+          </div>
+        ) : null}
+
+        {!isLoading && orderedQueue.length > 0 ? (
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Reserva</th>
+                  <th>Cliente</th>
+                  <th>Solicitado</th>
+                  <th>Estado</th>
+                  <th>Monto</th>
+                  <th>Detalle</th>
+                  <th>Accion</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orderedQueue.map((item) => (
+                  <tr key={`cancel-refund-${item.id}`}>
+                    <td>{item.reservation_code || `#${item.id}`}</td>
+                    <td>{item.user_email || item.user_full_name || `Usuario #${item.user_id}`}</td>
+                    <td>{item.refund_requested_at ? formatDate(item.refund_requested_at) : "-"}</td>
+                    <td>{formatReservationRefundStatus(item.refund_status)}</td>
+                    <td>{formatCurrency(item.refund_amount || item.total_amount)}</td>
+                    <td>{item.refund_notes ? String(item.refund_notes).slice(0, 80) : "-"}</td>
+                    <td>
+                      {item.refund_status === "rejected" ? (
+                        <button
+                          className="primary-button inline-action"
+                          type="button"
+                          disabled={processingReservationId === item.id}
+                          onClick={() => retryRefund(item.id)}
+                        >
+                          {processingReservationId === item.id ? "Reintentando..." : "Reintentar"}
+                        </button>
+                      ) : (
+                        <span className="muted">Sin acciones</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
+
+        {!isLoading && hasNextPage ? (
+          <div className="cta-row">
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => loadData({ silent: true, page: currentPage + 1, append: true })}
+            >
+              Cargar mas
+            </button>
+          </div>
+        ) : null}
+      </section>
     </section>
   );
 }
@@ -4211,6 +7833,7 @@ function CustomerProfilePage({ auth }) {
 function OrganizerEventsPage({ auth }) {
   const {
     events,
+    changeRequests,
     categories,
     formData,
     editingEventId,
@@ -4218,101 +7841,689 @@ function OrganizerEventsPage({ auth }) {
     isLoading,
     isRefreshing,
     isSubmitting,
+    isRequestSubmitting,
     deletingId,
+    disablingId,
     isEventModalOpen,
+    isChangeRequestModalOpen,
+    changeRequestMode,
+    changeRequestEventTitle,
+    changeRequestExplanation,
+    changeRequestSummary,
+    changeRequestAttachments,
     updateField,
     updateTicketType,
     addTicketType,
     removeTicketType,
     submitEvent,
+    submitChangeRequest,
     editEvent,
     deleteEvent,
+    disableEvent,
+    updateChangeRequestExplanation,
+    updateChangeRequestAttachments,
+    removeChangeRequestAttachment,
     openCreateModal,
     closeEventModal,
+    closeChangeRequestModal,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar tus eventos en este momento." });
+  const location = useLocation();
+  const navigate = useNavigate();
+  const params = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const activeView = params.get("view") || "dashboard";
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
 
-  return (
-    <section className="page-section organizer-page">
-      <header className="dashboard-section-header">
-        <div>
-          <p className="eyebrow">Organizer</p>
-          <h2>Gestiona el ciclo de vida de tus eventos</h2>
-          {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
+  const organizerInsights = useMemo(() => {
+    return events.reduce(
+      (summary, eventItem) => {
+        const ticketsSold = Number(eventItem.tickets_sold || 0);
+        const totalTickets = Number(eventItem.total_tickets || 0);
+        const availableTickets = Number(eventItem.available_tickets || 0);
+        const totalRevenue = Number(eventItem.revenue_total || 0);
+        const organizerRevenue = Number(eventItem.organizer_revenue || 0);
+        const isSoldOut = eventItem.is_sold_out || availableTickets <= 0;
+
+        summary.totalEvents += 1;
+        summary.totalTicketsSold += ticketsSold;
+        summary.totalRevenue += totalRevenue;
+        summary.organizerRevenue += organizerRevenue;
+        summary.totalTicketCapacity += totalTickets;
+
+        if (eventItem.status === "pending_review") {
+          summary.pendingReview += 1;
+        }
+
+        if (["published", "active"].includes(eventItem.status)) {
+          summary.published += 1;
+        }
+
+        if (["draft", "rejected"].includes(eventItem.status)) {
+          summary.pipelineBacklog += 1;
+        }
+
+        if (isSoldOut) {
+          summary.soldOut += 1;
+        }
+
+        return summary;
+      },
+      {
+        totalEvents: 0,
+        pendingReview: 0,
+        published: 0,
+        soldOut: 0,
+        totalTicketsSold: 0,
+        totalRevenue: 0,
+        organizerRevenue: 0,
+        totalTicketCapacity: 0,
+        pipelineBacklog: 0,
+      }
+    );
+  }, [events]);
+
+  const sellThroughAverage = useMemo(() => {
+    if (!organizerInsights.totalTicketCapacity) {
+      return 0;
+    }
+
+    return Math.min(100, Math.round((organizerInsights.totalTicketsSold / organizerInsights.totalTicketCapacity) * 100));
+  }, [organizerInsights]);
+
+  const normalizedSearchTerm = searchTerm.trim().toLowerCase();
+  const filteredEvents = useMemo(() => {
+    return events.filter((eventItem) => {
+      const matchesStatus = statusFilter === "all" ? true : eventItem.status === statusFilter;
+      const searchableText = [
+        eventItem.title,
+        eventItem.category_name,
+        eventItem.city,
+        eventItem.venue,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const matchesSearch = normalizedSearchTerm ? searchableText.includes(normalizedSearchTerm) : true;
+
+      return matchesStatus && matchesSearch;
+    });
+  }, [events, normalizedSearchTerm, statusFilter]);
+
+  const sortedByRevenue = useMemo(() => {
+    return [...filteredEvents].sort((left, right) => Number(right.revenue_total || 0) - Number(left.revenue_total || 0));
+  }, [filteredEvents]);
+
+  const topPerformingEvents = useMemo(() => sortedByRevenue.slice(0, 5), [sortedByRevenue]);
+
+  const recentEvents = useMemo(() => {
+    return [...filteredEvents]
+      .sort((left, right) => {
+        const leftDate = new Date(left.starts_at || left.event_date || left.created_at || 0).getTime();
+        const rightDate = new Date(right.starts_at || right.event_date || right.created_at || 0).getTime();
+        return rightDate - leftDate;
+      })
+      .slice(0, 6);
+  }, [filteredEvents]);
+
+  const topRevenueValue = useMemo(() => {
+    return topPerformingEvents.reduce((maxValue, eventItem) => Math.max(maxValue, Number(eventItem.revenue_total || 0)), 0) || 1;
+  }, [topPerformingEvents]);
+
+  const latestRequestByEventId = useMemo(() => {
+    return changeRequests.reduce((summary, request) => {
+      if (!summary[request.event_id]) {
+        summary[request.event_id] = request;
+      }
+
+      return summary;
+    }, {});
+  }, [changeRequests]);
+
+  const publishedEvents = useMemo(() => filteredEvents.filter((eventItem) => ["published", "active"].includes(eventItem.status)), [filteredEvents]);
+  const pendingEvents = useMemo(() => filteredEvents.filter((eventItem) => eventItem.status === "pending_review"), [filteredEvents]);
+  const draftEvents = useMemo(() => filteredEvents.filter((eventItem) => ["draft", "rejected", "paused"].includes(eventItem.status)), [filteredEvents]);
+  const soldOutEvents = useMemo(
+    () => filteredEvents.filter((eventItem) => eventItem.is_sold_out || Number(eventItem.available_tickets || 0) <= 0),
+    [filteredEvents]
+  );
+
+  const rankingLeadEvent = topPerformingEvents[0] || null;
+  const pipelineHeroEvent = pendingEvents[0] || publishedEvents[0] || draftEvents[0] || filteredEvents[0] || null;
+
+  const viewTitles = {
+    dashboard: {
+      eyebrow: "Dashboard de organizador",
+      title: "Controla tu operacion sin distracciones",
+      subtitle: "Mira ingresos, ventas, publicacion y movimiento reciente de tus eventos en una sola consola.",
+    },
+    events: {
+      eyebrow: "Gestion de eventos",
+      title: "Administra tu listado principal",
+      subtitle: "Filtra, revisa disponibilidad y entra directo a editar sin cambiar de pantalla.",
+    },
+    ranking: {
+      eyebrow: "Ranking de recaudacion",
+      title: "Detecta tus eventos mas fuertes",
+      subtitle: "Compara bruto, neto y traccion comercial con la misma fuente real del sistema.",
+    },
+    pipeline: {
+      eyebrow: "Pipeline de publicacion",
+      title: "Ubica que esta listo y que esta trabado",
+      subtitle: "Revisa borradores, pendientes de revision y eventos ya publicados desde una vista operativa.",
+    },
+    catalog: {
+      eyebrow: "Catalogo del organizer",
+      title: "Explora tu portafolio visual",
+      subtitle: "Consulta tus eventos como vitrina interna, con imagen, precio base y estado actual.",
+    },
+  };
+
+  const activeViewCopy = viewTitles[activeView] || viewTitles.dashboard;
+
+  const navigateOrganizerView = (viewId) => {
+    const nextParams = new URLSearchParams(location.search);
+
+    if (viewId === "dashboard") {
+      nextParams.delete("view");
+    } else {
+      nextParams.set("view", viewId);
+    }
+
+    navigate({
+      pathname: "/organizer/events",
+      search: nextParams.toString() ? `?${nextParams.toString()}` : "",
+    });
+  };
+
+  const getEventCover = (eventItem, index = 0) => {
+    return eventItem?.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length];
+  };
+
+  const renderEventRows = (collection) => {
+    if (!collection.length) {
+      return (
+        <div className="empty-state compact-state">
+          <h3>No hay eventos para mostrar</h3>
+          <p className="muted">Ajusta tus filtros o crea un nuevo evento para comenzar.</p>
         </div>
-        <button className="primary-button" type="button" onClick={openCreateModal}>
-          Crear evento
-        </button>
-      </header>
+      );
+    }
 
-      {feedback.message ? <InlineMessage type={feedback.type} message={feedback.message} /> : null}
+    return (
+      <div className="table-wrapper">
+        <table className="data-table organizer-data-table">
+          <thead>
+            <tr>
+              <th>Evento</th>
+              <th>Fecha</th>
+              <th>Estado</th>
+              <th>Vendidos</th>
+              <th>Disponibles</th>
+              <th>Bruto</th>
+              <th>Neto</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {collection.map((eventItem, index) => {
+              const ticketsSold = Number(eventItem.tickets_sold || 0);
+              const availableTickets = Number(eventItem.available_tickets || 0);
+              const totalTickets = Number(eventItem.total_tickets || 0);
+              const sellThrough = totalTickets > 0 ? Math.round(Math.min((ticketsSold / totalTickets) * 100, 100)) : 0;
+              const isSoldOut = eventItem.is_sold_out || availableTickets <= 0;
+              const latestRequest = latestRequestByEventId[eventItem.id];
+              const requiresModeratedChange = ORGANIZER_PROTECTED_EVENT_STATUSES.includes(eventItem.status);
 
-      <div className="metrics-grid">
-        <article className="metric-card">
-          <span>Total eventos</span>
-          <strong>{events.length}</strong>
-          <small>Creados por tu cuenta</small>
-        </article>
-        <article className="metric-card">
-          <span>En revision</span>
-          <strong>{events.filter((item) => item.status === "pending_review").length}</strong>
-          <small>Esperando moderacion</small>
-        </article>
+              return (
+                <tr key={`org-row-${eventItem.id}`}>
+                  <td>
+                    <div className="organizer-table-event">
+                      <img src={getEventCover(eventItem, index)} alt={eventItem.title} />
+                      <div>
+                        <strong>{eventItem.title}</strong>
+                        <span>{eventItem.venue || "Venue por confirmar"}</span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>{formatDate(eventItem.starts_at || eventItem.event_date)}</td>
+                  <td>
+                    <span className={`status-pill ${isSoldOut ? "cancelled" : eventItem.status}`}>
+                      {isSoldOut ? "Sold out" : getEventStatusLabel(eventItem.status)}
+                    </span>
+                  </td>
+                  <td>{ticketsSold}</td>
+                  <td>{availableTickets}</td>
+                  <td>{formatCurrency(eventItem.revenue_total || 0)}</td>
+                  <td>{formatCurrency(eventItem.organizer_revenue || 0)}</td>
+                  <td>
+                    <div className="cta-row compact-actions organizer-row-actions">
+                      <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
+                        {requiresModeratedChange ? "Solicitar cambios" : "Editar"}
+                      </button>
+                      {["published", "active"].includes(eventItem.status) ? (
+                        <button
+                          className="ghost-button"
+                          type="button"
+                          disabled={disablingId === eventItem.id}
+                          onClick={() => disableEvent(eventItem.id)}
+                        >
+                          {disablingId === eventItem.id ? "Deshabilitando..." : "Deshabilitar"}
+                        </button>
+                      ) : null}
+                      <button className="ghost-button" type="button" disabled={deletingId === eventItem.id} onClick={() => deleteEvent(eventItem.id)}>
+                        {deletingId === eventItem.id
+                          ? "Eliminando..."
+                          : requiresModeratedChange
+                            ? "Solicitar cancelacion"
+                            : "Eliminar"}
+                      </button>
+                      <span className="organizer-sell-through-label">{sellThrough}%</span>
+                    </div>
+                    {latestRequest ? (
+                      <div className="organizer-request-hint">
+                        <span className={`status-pill ${latestRequest.status}`}>{getChangeRequestStatusLabel(latestRequest.status)}</span>
+                        <small>{getChangeRequestTypeLabel(latestRequest.request_type)} en seguimiento</small>
+                      </div>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  const renderDashboardView = () => (
+    <>
+      <div className="metrics-grid organizer-console-metrics">
         <article className="metric-card highlight">
-          <span>Publicados</span>
-          <strong>{events.filter((item) => ["published", "active"].includes(item.status)).length}</strong>
-          <small>Visibles en catalogo</small>
+          <span>Recaudacion bruta</span>
+          <strong>{formatCurrency(organizerInsights.totalRevenue)}</strong>
+          <small>Ingresos confirmados en tu portafolio</small>
+        </article>
+        <article className="metric-card">
+          <span>Ganancia neta</span>
+          <strong>{formatCurrency(organizerInsights.organizerRevenue)}</strong>
+          <small>Proyeccion neta del organizer</small>
+        </article>
+        <article className="metric-card">
+          <span>Entradas vendidas</span>
+          <strong>{organizerInsights.totalTicketsSold}</strong>
+          <small>Sell-through promedio {sellThroughAverage}%</small>
+        </article>
+        <article className="metric-card">
+          <span>Eventos sold out</span>
+          <strong>{organizerInsights.soldOut}</strong>
+          <small>Exito operativo total</small>
         </article>
       </div>
 
-      <div className="dashboard-two-column align-start">
-        <section className="dashboard-stack">
-          <section className="panel-card">
-            <div className="panel-card-header">
-              <h3>Acciones rapidas</h3>
+      <div className="dashboard-two-column organizer-console-overview">
+        <section className="panel-card">
+          <div className="panel-card-header">
+            <div>
+              <h3>Ranking de mayor recaudacion</h3>
+              <p className="muted">Los eventos con mejor rendimiento segun pagos realmente completados.</p>
             </div>
-            <p className="muted">Crea nuevos eventos, actualiza informacion clave y revisa el estado de publicacion de tus experiencias.</p>
-            <div className="cta-row compact-actions">
-              <button className="primary-button" type="button" onClick={openCreateModal}>
-                Nuevo evento
-              </button>
-              <Link className="secondary-button" to="/events">
-                Ver catalogo
-              </Link>
+            <button className="ghost-button" type="button" onClick={() => navigateOrganizerView("ranking")}>
+              Ver ranking
+            </button>
+          </div>
+          {!topPerformingEvents.length ? (
+            <div className="empty-state compact-state">
+              <h3>Aun no hay ventas registradas</h3>
+              <p className="muted">Cuando lleguen pagos confirmados, el ranking aparecera aqui.</p>
             </div>
-          </section>
+          ) : (
+            <div className="revenue-chart-list">
+              {topPerformingEvents.map((eventItem) => {
+                const totalRevenue = Number(eventItem.revenue_total || 0);
+                const totalWidth = `${Math.max((totalRevenue / topRevenueValue) * 100, totalRevenue > 0 ? 8 : 0)}%`;
+
+                return (
+                  <article className="revenue-chart-item" key={`organizer-chart-${eventItem.id}`}>
+                    <div className="revenue-chart-copy">
+                      <strong>{eventItem.title}</strong>
+                      <span>{Number(eventItem.tickets_sold || 0)} entradas vendidas</span>
+                    </div>
+                    <div className="revenue-chart-bars">
+                      <div className="revenue-bar-group">
+                        <span>{formatCurrency(totalRevenue)}</span>
+                        <div className="chart-bar-track">
+                          <div className="chart-bar total" style={{ width: totalWidth }} />
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </section>
 
-        <aside className="dashboard-stack">
-          <section className="panel-card">
-            <div className="panel-card-header">
-              <h3>Mis eventos</h3>
+        <aside className="panel-card organizer-pipeline-summary-card">
+          <div className="panel-card-header">
+            <div>
+              <h3>Pipeline de publicacion</h3>
+              <p className="muted">Estado actual de avance y moderacion.</p>
             </div>
-            {isLoading ? <p className="muted">Cargando eventos...</p> : null}
-            <div className="activity-list organizer-event-list">
-              {events.map((eventItem) => (
-                <article className="activity-item organizer-event-item" key={eventItem.id}>
-                  <div>
-                    <p>
-                      <strong>{eventItem.title}</strong>
-                    </p>
-                    <span>
-                      {getEventStatusLabel(eventItem.status)} · {formatDate(eventItem.starts_at || eventItem.event_date)}
-                    </span>
-                    {eventItem.rejection_reason ? <small>Motivo: {eventItem.rejection_reason}</small> : null}
-                  </div>
-                  <div className="cta-row compact-actions">
-                    <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
-                      Editar
-                    </button>
-                    <button className="ghost-button" type="button" disabled={deletingId === eventItem.id} onClick={() => deleteEvent(eventItem.id)}>
-                      {deletingId === eventItem.id ? "Eliminando..." : "Eliminar"}
-                    </button>
-                  </div>
-                </article>
-              ))}
+            <button className="ghost-button" type="button" onClick={() => navigateOrganizerView("pipeline")}>
+              Abrir
+            </button>
+          </div>
+          <div className="organizer-pipeline-visual">
+            <img src={pipelineHeroEvent ? getEventCover(pipelineHeroEvent) : AUTH_PANEL_IMAGE} alt="Pipeline visual" />
+          </div>
+          <div className="summary-stat-list">
+            <div>
+              <strong>{organizerInsights.pendingReview}</strong>
+              <span>En revision</span>
             </div>
-          </section>
+            <div>
+              <strong>{organizerInsights.published}</strong>
+              <span>Publicados</span>
+            </div>
+            <div>
+              <strong>{organizerInsights.pipelineBacklog}</strong>
+              <span>Borrador o ajuste</span>
+            </div>
+          </div>
         </aside>
+      </div>
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Mis eventos recientes</h3>
+            <p className="muted">Vista rapida para abrir y editar tus eventos mas cercanos.</p>
+          </div>
+        </div>
+        {renderEventRows(recentEvents)}
+      </section>
+
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Solicitudes recientes</h3>
+            <p className="muted">Aqui veras observaciones administrativas y el avance de tus solicitudes sobre eventos publicados.</p>
+          </div>
+        </div>
+        {!changeRequests.length ? (
+          <div className="empty-state compact-state">
+            <h3>Aun no tienes solicitudes</h3>
+            <p className="muted">Cuando envies cambios o cancelaciones para eventos operativos, apareceran aqui.</p>
+          </div>
+        ) : (
+          <div className="change-request-queue">
+            {changeRequests.slice(0, 4).map((request) => (
+              <article className="change-request-queue-item" key={request.id}>
+                <div>
+                  <strong>{request.event_title}</strong>
+                  <span>{getChangeRequestTypeLabel(request.request_type)} · {getChangeRequestStatusLabel(request.status)}</span>
+                </div>
+                <p className="muted">{request.explanation}</p>
+                {request.admin_response ? <small>Observacion admin: {request.admin_response}</small> : null}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </>
+  );
+
+  const renderEventsView = () => (
+    <section className="panel-card">
+      <div className="panel-card-header">
+        <div>
+          <h3>Gestion de eventos</h3>
+          <p className="muted">Todo tu listado operativo en una tabla directa.</p>
+        </div>
+      </div>
+      {renderEventRows(filteredEvents)}
+    </section>
+  );
+
+  const renderRankingView = () => (
+    <div className="dashboard-two-column organizer-console-overview">
+      <section className="panel-card">
+        <div className="panel-card-header">
+          <div>
+            <h3>Ranking detallado</h3>
+            <p className="muted">Comparativa de ingresos y conversion de tus eventos.</p>
+          </div>
+        </div>
+        {renderEventRows(topPerformingEvents)}
+      </section>
+
+      <aside className="dashboard-stack">
+        <section className="panel-card organizer-featured-event-card">
+          <div className="panel-card-header">
+            <div>
+              <h3>Top performance</h3>
+              <p className="muted">Tu evento con mejor recaudacion actual.</p>
+            </div>
+          </div>
+          {rankingLeadEvent ? (
+            <>
+              <img src={getEventCover(rankingLeadEvent)} alt={rankingLeadEvent.title} />
+              <div className="organizer-featured-event-copy">
+                <strong>{rankingLeadEvent.title}</strong>
+                <span>{formatDate(rankingLeadEvent.starts_at || rankingLeadEvent.event_date)}</span>
+                <p className="muted">
+                  {formatCurrency(rankingLeadEvent.revenue_total || 0)} brutos · {Number(rankingLeadEvent.tickets_sold || 0)} tickets vendidos
+                </p>
+              </div>
+            </>
+          ) : (
+            <div className="empty-state compact-state">
+              <h3>Sin ranking aun</h3>
+              <p className="muted">Todavia no hay suficientes ventas para destacar un evento.</p>
+            </div>
+          )}
+        </section>
+      </aside>
+    </div>
+  );
+
+  const renderPipelineColumn = (title, description, collection) => (
+    <section className="panel-card organizer-pipeline-column">
+      <div className="panel-card-header">
+        <div>
+          <h3>{title}</h3>
+          <p className="muted">{description}</p>
+        </div>
+      </div>
+      {!collection.length ? (
+        <p className="muted">Sin eventos en esta etapa.</p>
+      ) : (
+        <div className="activity-list">
+          {collection.map((eventItem, index) => (
+            <article className="activity-item organizer-pipeline-item" key={`pipeline-${title}-${eventItem.id}`}>
+              <img src={getEventCover(eventItem, index)} alt={eventItem.title} />
+              <div>
+                <strong>{eventItem.title}</strong>
+                <span>{getEventStatusLabel(eventItem.status)}</span>
+                <small>{formatDate(eventItem.starts_at || eventItem.event_date)}</small>
+              </div>
+              <button className="ghost-button" type="button" onClick={() => editEvent(eventItem)}>
+                Editar
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+
+  const renderPipelineView = () => (
+    <>
+      <section className="panel-card organizer-pipeline-hero">
+        <div className="organizer-pipeline-hero-media">
+          <img src={pipelineHeroEvent ? getEventCover(pipelineHeroEvent) : AUTH_PANEL_IMAGE} alt="Pipeline de publicacion" />
+        </div>
+        <div className="organizer-pipeline-hero-copy">
+          <p className="eyebrow">Pipeline visual</p>
+          <h3>{pipelineHeroEvent?.title || "Tu siguiente lanzamiento empieza aqui"}</h3>
+          <p className="muted">
+            {pipelineHeroEvent
+              ? `Estado actual: ${getEventStatusLabel(pipelineHeroEvent.status)}. Ajusta tickets, contenido y publicacion desde esta misma consola.`
+              : "Aun no tienes eventos cargados. Crea uno nuevo para activar tu pipeline de publicacion."}
+          </p>
+          <div className="cta-row compact-actions">
+            <button className="primary-button" type="button" onClick={openCreateModal}>
+              Nuevo evento
+            </button>
+            {pipelineHeroEvent ? (
+              <button className="secondary-button" type="button" onClick={() => editEvent(pipelineHeroEvent)}>
+                Abrir evento
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      <div className="organizer-pipeline-grid">
+        {renderPipelineColumn("Backlog", "Borradores, pausados o rechazados.", draftEvents)}
+        {renderPipelineColumn("Revision", "Eventos esperando aprobacion.", pendingEvents)}
+        {renderPipelineColumn("Live", "Eventos publicados, activos o agotados.", [...publishedEvents, ...soldOutEvents.filter((item) => !publishedEvents.some((candidate) => candidate.id === item.id))])}
+      </div>
+    </>
+  );
+
+  const renderCatalogView = () => (
+    <section className="panel-card">
+      <div className="panel-card-header">
+        <div>
+          <h3>Catalogo visual</h3>
+          <p className="muted">Portafolio visual de tus eventos, manteniendo la paleta y el estilo de CrowdPass.</p>
+        </div>
+      </div>
+      {!filteredEvents.length ? (
+        <div className="empty-state compact-state">
+          <h3>No hay eventos en tu catalogo interno</h3>
+          <p className="muted">Crea un nuevo evento para alimentar tu portafolio visual.</p>
+        </div>
+      ) : (
+        <div className="organizer-catalog-grid">
+          {filteredEvents.map((eventItem, index) => {
+            const availableTickets = Number(eventItem.available_tickets || 0);
+            const totalTickets = Number(eventItem.total_tickets || 0);
+            const sellThrough = totalTickets > 0 ? Math.round(Math.min(((totalTickets - availableTickets) / totalTickets) * 100, 100)) : 0;
+
+            return (
+              <article className="organizer-catalog-card" key={`catalog-${eventItem.id}`}>
+                <div className="organizer-catalog-media">
+                  <img src={getEventCover(eventItem, index)} alt={eventItem.title} />
+                  <span className={`status-pill ${eventItem.status}`}>{getEventStatusLabel(eventItem.status)}</span>
+                </div>
+                <div className="organizer-catalog-copy">
+                  <strong>{eventItem.title}</strong>
+                  <span>{eventItem.category_name || "Evento"} · {eventItem.city || "Peru"}</span>
+                  <p className="muted">{eventItem.venue || "Venue por confirmar"}</p>
+                </div>
+                <div className="organizer-catalog-meta">
+                  <div>
+                    <span>Bruto</span>
+                    <strong>{formatCurrency(eventItem.revenue_total || 0)}</strong>
+                  </div>
+                  <div>
+                    <span>Progreso</span>
+                    <strong>{sellThrough}%</strong>
+                  </div>
+                </div>
+                <div className="chart-bar-track">
+                  <div className="chart-bar total" style={{ width: `${sellThrough}%` }} />
+                </div>
+                <div className="cta-row compact-actions">
+                  <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
+                    Editar
+                  </button>
+                  <button className="ghost-button" type="button" onClick={() => navigate(`/events/${eventItem.id}`)}>
+                    Ver detalle
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+          <button className="organizer-catalog-card organizer-catalog-create" type="button" onClick={openCreateModal}>
+            <span>+</span>
+            <strong>Nuevo evento</strong>
+            <small>Publica una nueva experiencia desde tu consola</small>
+          </button>
+        </div>
+      )}
+    </section>
+  );
+
+  const renderActiveView = () => {
+    if (activeView === "events") {
+      return renderEventsView();
+    }
+
+    if (activeView === "ranking") {
+      return renderRankingView();
+    }
+
+    if (activeView === "pipeline") {
+      return renderPipelineView();
+    }
+
+    if (activeView === "catalog") {
+      return renderCatalogView();
+    }
+
+    return renderDashboardView();
+  };
+
+  return (
+    <section className="page-section organizer-page">
+      <div className="organizer-console-main">
+        <header className="organizer-console-topbar">
+          <div>
+            <p className="eyebrow">{activeViewCopy.eyebrow}</p>
+            <h2>{activeViewCopy.title}</h2>
+          </div>
+
+          <div className="organizer-console-topbar-actions">
+            <label className="organizer-console-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                placeholder="Buscar eventos, venues o categorias"
+                type="search"
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+              />
+            </label>
+            <select className="organizer-console-filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">Todos los estados</option>
+              <option value="draft">Borrador</option>
+              <option value="pending_review">Pendiente</option>
+              <option value="published">Publicado</option>
+              <option value="active">Activo</option>
+              <option value="paused">Pausado</option>
+              <option value="rejected">Rechazado</option>
+            </select>
+            <div className="organizer-console-profile">
+              <img src={ADMIN_AVATAR_IMAGE} alt="Perfil organizador" />
+              <div>
+                <strong>{auth.currentUser?.full_name || auth.currentUser?.email}</strong>
+                <span>{getRoleLabel(auth.currentUser?.role)}</span>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <div className="organizer-console-subtitle-row">
+          <p className="muted">{activeViewCopy.subtitle}</p>
+          {!isLoading && isRefreshing ? <span className="muted">Actualizando informacion...</span> : null}
+        </div>
+
+        {feedback.message ? <InlineMessage type={feedback.type} message={feedback.message} /> : null}
+        {isLoading ? <p className="muted">Cargando consola del organizer...</p> : null}
+
+        {!isLoading ? renderActiveView() : null}
       </div>
 
       <EventEditorModal
@@ -4328,11 +8539,27 @@ function OrganizerEventsPage({ auth }) {
         onAddTicketType={addTicketType}
         onRemoveTicketType={removeTicketType}
       />
+      <EventChangeRequestModal
+        attachments={changeRequestAttachments}
+        eventTitle={changeRequestEventTitle}
+        explanation={changeRequestExplanation}
+        isOpen={isChangeRequestModalOpen}
+        isSubmitting={isRequestSubmitting}
+        mode={changeRequestMode}
+        onAttachmentsChange={updateChangeRequestAttachments}
+        onClose={closeChangeRequestModal}
+        onExplanationChange={updateChangeRequestExplanation}
+        onRemoveAttachment={removeChangeRequestAttachment}
+        onSubmit={submitChangeRequest}
+        summary={changeRequestSummary}
+      />
     </section>
   );
 }
 
 function AdminEventsPage({ auth }) {
+  const location = useLocation();
+  const backofficePrefix = location.pathname.startsWith("/superadmin") ? "/superadmin" : "/admin";
   const {
     events,
     categories,
@@ -4343,6 +8570,7 @@ function AdminEventsPage({ auth }) {
     isRefreshing,
     isSubmitting,
     deletingId,
+    disablingId,
     isEventModalOpen,
     updateField,
     updateTicketType,
@@ -4351,6 +8579,7 @@ function AdminEventsPage({ auth }) {
     submitEvent,
     editEvent,
     deleteEvent,
+    disableEvent,
     openCreateModal,
     closeEventModal,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar los eventos de administracion en este momento." });
@@ -4370,7 +8599,7 @@ function AdminEventsPage({ auth }) {
           <button className="primary-button" type="button" onClick={openCreateModal}>
             Crear evento
           </button>
-          <Link className="secondary-button" to="/admin/events/catalog">
+          <Link className="secondary-button" to={`${backofficePrefix}/events/catalog`}>
             Ver catalogo completo
           </Link>
         </div>
@@ -4453,6 +8682,11 @@ function AdminEventsPage({ auth }) {
                 <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
                   Editar
                 </button>
+                {["published", "active"].includes(eventItem.status) ? (
+                  <button className="ghost-button" type="button" disabled={disablingId === eventItem.id} onClick={() => disableEvent(eventItem.id)}>
+                    {disablingId === eventItem.id ? "Deshabilitando..." : "Deshabilitar"}
+                  </button>
+                ) : null}
                 <button className="ghost-button" type="button" disabled={deletingId === eventItem.id} onClick={() => deleteEvent(eventItem.id)}>
                   {deletingId === eventItem.id ? "Eliminando..." : "Eliminar"}
                 </button>
@@ -4480,6 +8714,8 @@ function AdminEventsPage({ auth }) {
 }
 
 function AdminEventCatalogPage({ auth }) {
+  const location = useLocation();
+  const backofficePrefix = location.pathname.startsWith("/superadmin") ? "/superadmin" : "/admin";
   const {
     events,
     categories,
@@ -4490,6 +8726,7 @@ function AdminEventCatalogPage({ auth }) {
     isRefreshing,
     isSubmitting,
     deletingId,
+    disablingId,
     isEventModalOpen,
     updateField,
     updateTicketType,
@@ -4498,6 +8735,7 @@ function AdminEventCatalogPage({ auth }) {
     submitEvent,
     editEvent,
     deleteEvent,
+    disableEvent,
     openCreateModal,
     closeEventModal,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar el catalogo administrativo en este momento." });
@@ -4515,7 +8753,7 @@ function AdminEventCatalogPage({ auth }) {
           <button className="primary-button" type="button" onClick={openCreateModal}>
             Crear evento
           </button>
-          <Link className="secondary-button" to="/admin/events">
+          <Link className="secondary-button" to={`${backofficePrefix}/events`}>
             Volver a gestion
           </Link>
         </div>
@@ -4531,7 +8769,14 @@ function AdminEventCatalogPage({ auth }) {
           </div>
         </div>
         {isLoading ? <p className="muted">Cargando eventos...</p> : null}
-        <AdminEventCatalogGrid events={events} deletingId={deletingId} onEdit={editEvent} onDelete={deleteEvent} />
+        <AdminEventCatalogGrid
+          events={events}
+          deletingId={deletingId}
+          disablingId={disablingId}
+          onEdit={editEvent}
+          onDisable={disableEvent}
+          onDelete={deleteEvent}
+        />
       </section>
 
       <EventEditorModal
@@ -4552,9 +8797,17 @@ function AdminEventCatalogPage({ auth }) {
 }
 
 function AdminUsersPage({ auth }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [users, setUsers] = useState([]);
   const [feedback, setFeedback] = useState("");
   const [page, setPage] = useState(1);
+  const isSuperAdmin = Boolean(auth.currentUser?.is_super_admin);
+  const [userGroup, setUserGroup] = useState(() => {
+    const searchParams = new URLSearchParams(location.search);
+    return searchParams.get("group") || "organizers";
+  });
+  const [organizerStatusFilter, setOrganizerStatusFilter] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [pagination, setPagination] = useState({
@@ -4567,6 +8820,40 @@ function AdminUsersPage({ auth }) {
   });
   const [userDrafts, setUserDrafts] = useState({});
   const [savingUserId, setSavingUserId] = useState(null);
+  const [deletingUserId, setDeletingUserId] = useState(null);
+  const [isCreateUserOpen, setIsCreateUserOpen] = useState(false);
+  const [createUserDraft, setCreateUserDraft] = useState({
+    fullName: "",
+    email: "",
+    password: "",
+    role: "customer",
+    organizerStatus: "",
+    isActive: true,
+  });
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [createFeedback, setCreateFeedback] = useState("");
+
+  useEffect(() => {
+    const nextGroup = new URLSearchParams(location.search).get("group") || "organizers";
+    if (nextGroup !== userGroup) {
+      setUserGroup(nextGroup);
+      setPage(1);
+    }
+  }, [location.search, userGroup]);
+
+  useEffect(() => {
+    if (!isSuperAdmin && (userGroup === "admins" || userGroup === "all")) {
+      setUserGroup("organizers");
+      setPage(1);
+    }
+  }, [isSuperAdmin, userGroup]);
+
+  const setGroupAndSyncUrl = (nextGroup) => {
+    setOrganizerStatusFilter("");
+    setPage(1);
+    setUserGroup(nextGroup);
+    navigate({ pathname: location.pathname, search: `?group=${encodeURIComponent(nextGroup)}` });
+  };
 
   const loadUsers = useCallback(
     async ({ silent = false } = {}) => {
@@ -4577,14 +8864,39 @@ function AdminUsersPage({ auth }) {
       }
 
       try {
-        const response = await apiRequest(`/users?page=${page}&limit=${USERS_PAGE_SIZE}`, {
+        let url = `/users?page=${page}&limit=${USERS_PAGE_SIZE}&group=${encodeURIComponent(userGroup)}`;
+        if (isSuperAdmin && (userGroup === "all" || userGroup === "admins")) {
+          url += "&include_admins=1";
+        }
+        if (userGroup === "organizers" && organizerStatusFilter) {
+          url += `&organizer_status=${encodeURIComponent(organizerStatusFilter)}`;
+        }
+        const response = await apiRequest(url, {
           method: "GET",
           headers: {
             Authorization: `Bearer ${auth.token}`,
           },
         });
 
-        const nextUsers = response.data || [];
+        const responseUsers = response.data || [];
+        let nextUsers = responseUsers;
+
+        if (!isSuperAdmin) {
+          nextUsers = nextUsers.filter((user) => user.role !== "admin");
+        }
+
+        if (userGroup === "customers") {
+          nextUsers = nextUsers.filter((user) => user.role === "customer" && user.organizer_status === "not_requested");
+        } else if (userGroup === "staff") {
+          nextUsers = nextUsers.filter((user) => user.role === "staff");
+        } else if (userGroup === "organizers") {
+          nextUsers = nextUsers.filter(
+            (user) => user.role === "organizer" || (user.role === "customer" && user.organizer_status !== "not_requested")
+          );
+        } else if (userGroup === "admins") {
+          nextUsers = nextUsers.filter((user) => user.role === "admin");
+        }
+
         setUsers(nextUsers);
         setPagination({
           page: response.meta?.page || page,
@@ -4612,7 +8924,7 @@ function AdminUsersPage({ auth }) {
         setIsRefreshing(false);
       }
     },
-    [auth.token, page]
+    [auth.token, isSuperAdmin, page, organizerStatusFilter, userGroup]
   );
 
   useEffect(() => {
@@ -4620,6 +8932,143 @@ function AdminUsersPage({ auth }) {
   }, [loadUsers]);
 
   useAutoRefresh(() => loadUsers({ silent: true }), USERS_REFRESH_INTERVAL, Boolean(auth.token));
+
+  const canEditUser = (user) => {
+    if (isSuperAdmin) {
+      return true;
+    }
+
+    if (user.role === "admin") {
+      return false;
+    }
+
+    if (user.role === "staff") {
+      return true;
+    }
+
+    if (user.role === "organizer") {
+      return true;
+    }
+
+    if (user.role === "customer" && user.organizer_status !== "not_requested") {
+      return true;
+    }
+
+    return false;
+  };
+
+  const canEditIsActive = (user) => {
+    if (isSuperAdmin) {
+      return true;
+    }
+
+    return user.role === "staff";
+  };
+
+  const canEditRole = (user) => {
+    if (isSuperAdmin) {
+      return true;
+    }
+
+    return user.role === "organizer";
+  };
+
+  const canEditOrganizerStatus = (user) => {
+    if (isSuperAdmin) {
+      return true;
+    }
+
+    return user.role === "customer" && user.organizer_status !== "not_requested";
+  };
+
+  const allowedRolesForUser = (user) => {
+    if (isSuperAdmin) {
+      return ["customer", "organizer", "staff", "admin"];
+    }
+
+    if (user.role === "organizer") {
+      return ["organizer", "customer"];
+    }
+
+    return [user.role];
+  };
+
+  const canDeleteUser = () => isSuperAdmin;
+
+  const resolveDefaultRoleForGroup = useCallback(
+    (group) => {
+      if (!isSuperAdmin) {
+        return "customer";
+      }
+
+      if (group === "customers") {
+        return "customer";
+      }
+
+      if (group === "staff") {
+        return "staff";
+      }
+
+      if (group === "admins") {
+        return "admin";
+      }
+
+      if (group === "organizers") {
+        return "organizer";
+      }
+
+      return "customer";
+    },
+    [isSuperAdmin]
+  );
+
+  const openCreateUserModal = () => {
+    const defaultRole = resolveDefaultRoleForGroup(userGroup);
+    setCreateFeedback("");
+    setCreateUserDraft({
+      fullName: "",
+      email: "",
+      password: "",
+      role: defaultRole,
+      organizerStatus: defaultRole === "organizer" ? "approved" : "",
+      isActive: true,
+    });
+    setIsCreateUserOpen(true);
+  };
+
+  const closeCreateUserModal = () => {
+    setIsCreateUserOpen(false);
+  };
+
+  const submitCreateUser = async (event) => {
+    event.preventDefault();
+    setIsCreatingUser(true);
+    setCreateFeedback("");
+
+    try {
+      await apiRequest("/users", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({
+          fullName: createUserDraft.fullName,
+          email: createUserDraft.email,
+          password: createUserDraft.password,
+          role: createUserDraft.role,
+          organizerStatus: createUserDraft.organizerStatus || undefined,
+          isActive: Boolean(createUserDraft.isActive),
+        }),
+      });
+
+      setIsCreateUserOpen(false);
+      await loadUsers({ silent: true });
+    } catch (error) {
+      setCreateFeedback(getUserFacingErrorMessage(error, "No pudimos crear el usuario en este momento."));
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
 
   const saveUser = async (userId) => {
     setSavingUserId(userId);
@@ -4642,6 +9091,89 @@ function AdminUsersPage({ auth }) {
     }
   };
 
+  const deleteUser = async (userId) => {
+    const user = users.find((item) => item.id === userId);
+
+    if (!user) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Se eliminara el usuario ${user.full_name}. Esta accion solo funciona si no tiene historial operativo. Deseas continuar?`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingUserId(userId);
+    setFeedback("");
+
+    try {
+      await apiRequest(`/users/${userId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+      });
+
+      if (users.length === 1 && page > 1) {
+        setPage((currentPage) => currentPage - 1);
+      } else {
+        await loadUsers({ silent: true });
+      }
+    } catch (error) {
+      setFeedback(getUserFacingErrorMessage(error, "No pudimos eliminar el usuario seleccionado."));
+    } finally {
+      setDeletingUserId(null);
+    }
+  };
+
+  const metricsCards = useMemo(() => {
+    const activeCount = users.filter((user) => Boolean(user.is_active)).length;
+    const inactiveCount = users.length - activeCount;
+    const pendingCount = users.filter((user) => user.organizer_status === "pending").length;
+    const approvedCount = users.filter((user) => user.organizer_status === "approved" || user.role === "organizer").length;
+    const rejectedCount = users.filter((user) => user.organizer_status === "rejected").length;
+
+    if (userGroup === "customers") {
+      return [
+        { highlight: true, label: "Clientes", value: pagination.total, small: "Base registrada" },
+        { label: "Activos", value: activeCount, small: "En esta pagina" },
+        { label: "Inactivos", value: inactiveCount, small: "En esta pagina" },
+      ];
+    }
+
+    if (userGroup === "staff") {
+      return [
+        { highlight: true, label: "Staff", value: pagination.total, small: "Cuentas operativas" },
+        { label: "Activos", value: activeCount, small: "En esta pagina" },
+        { label: "Inactivos", value: inactiveCount, small: "En esta pagina" },
+      ];
+    }
+
+    if (userGroup === "admins") {
+      return [
+        { highlight: true, label: "Admins", value: pagination.total, small: "Cuentas administrativas" },
+        { label: "Activos", value: activeCount, small: "En esta pagina" },
+        { label: "Inactivos", value: inactiveCount, small: "En esta pagina" },
+      ];
+    }
+
+    if (userGroup === "all" && isSuperAdmin) {
+      return [
+        { highlight: true, label: "Total usuarios", value: pagination.total, small: "Base registrada" },
+        { label: "Activos", value: activeCount, small: "En esta pagina" },
+        { label: "Pendientes", value: pendingCount, small: "Solicitudes organizer" },
+      ];
+    }
+
+    return [
+      { highlight: true, label: "Organizadores", value: pagination.total, small: "Vista actual" },
+      { label: "Aprobados", value: approvedCount, small: "En esta pagina" },
+      { label: "Pendientes", value: pendingCount, small: "En esta pagina" },
+      rejectedCount > 0 ? { label: "Rechazados", value: rejectedCount, small: "En esta pagina" } : null,
+    ].filter(Boolean);
+  }, [isSuperAdmin, pagination.total, userGroup, users]);
+
   return (
     <section className="page-section admin-page">
       <header className="dashboard-section-header">
@@ -4650,7 +9182,7 @@ function AdminUsersPage({ auth }) {
           <h2>Gestion de usuarios y aprobaciones</h2>
           {!isLoading && isRefreshing ? <p className="muted">Actualizando informacion...</p> : null}
         </div>
-        <Link className="secondary-button" to="/admin/events/review">
+        <Link className="secondary-button" to={`${location.pathname.startsWith("/superadmin") ? "/superadmin" : "/admin"}/events/review`}>
           Ver revision de eventos
         </Link>
       </header>
@@ -4658,26 +9190,95 @@ function AdminUsersPage({ auth }) {
       {feedback ? <InlineMessage type="error" message={feedback} /> : null}
 
       <div className="metrics-grid admin-metrics">
-        <article className="metric-card highlight">
-          <span>Total usuarios</span>
-          <strong>{pagination.total}</strong>
-          <small>Base registrada</small>
-        </article>
-        <article className="metric-card">
-          <span>Organizers</span>
-          <strong>{users.filter((user) => user.role === "organizer").length}</strong>
-          <small>Con permisos de publicacion</small>
-        </article>
-        <article className="metric-card">
-          <span>Pendientes</span>
-          <strong>{users.filter((user) => user.organizer_status === "pending").length}</strong>
-          <small>Solicitudes de organizer</small>
-        </article>
+        {metricsCards.map((card) => (
+          <article className={`metric-card ${card.highlight ? "highlight" : ""}`} key={card.label}>
+            <span>{card.label}</span>
+            <strong>{card.value}</strong>
+            <small>{card.small}</small>
+          </article>
+        ))}
       </div>
 
       <section className="panel-card table-panel">
         <div className="panel-card-header">
           <h3>Usuarios registrados</h3>
+          <div className="admin-users-panel-actions">
+            {isSuperAdmin ? (
+              <button className="primary-button" type="button" onClick={openCreateUserModal}>
+                Crear nuevo
+              </button>
+            ) : null}
+            <div className="market-filter-pill-row admin-users-group-tabs">
+              <button
+                type="button"
+                className={`market-filter-pill ${userGroup === "customers" ? "active" : ""}`}
+                onClick={() => {
+                  setGroupAndSyncUrl("customers");
+                }}
+              >
+                Clientes
+              </button>
+              <button
+                type="button"
+                className={`market-filter-pill ${userGroup === "organizers" ? "active" : ""}`}
+                onClick={() => {
+                  setGroupAndSyncUrl("organizers");
+                }}
+              >
+                Organizadores
+              </button>
+              <button
+                type="button"
+                className={`market-filter-pill ${userGroup === "staff" ? "active" : ""}`}
+                onClick={() => {
+                  setGroupAndSyncUrl("staff");
+                }}
+              >
+                Staff
+              </button>
+              {isSuperAdmin ? (
+                <>
+                  <button
+                    type="button"
+                    className={`market-filter-pill ${userGroup === "admins" ? "active" : ""}`}
+                    onClick={() => {
+                      setGroupAndSyncUrl("admins");
+                    }}
+                  >
+                    Admins
+                  </button>
+                  <button
+                    type="button"
+                    className={`market-filter-pill ${userGroup === "all" ? "active" : ""}`}
+                    onClick={() => {
+                      setGroupAndSyncUrl("all");
+                    }}
+                  >
+                    Todos
+                  </button>
+                </>
+              ) : null}
+            </div>
+
+            {userGroup === "organizers" ? (
+              <div className="admin-users-organizer-filter">
+                <label>Filtrar organizer:</label>
+                <select
+                  value={organizerStatusFilter}
+                  onChange={(event) => {
+                    setOrganizerStatusFilter(event.target.value);
+                    setPage(1);
+                  }}
+                >
+                  <option value="">Todos</option>
+                  <option value="pending">Pendiente</option>
+                  <option value="approved">Aprobado</option>
+                  <option value="rejected">Rechazado</option>
+                  <option value="not_requested">No solicitado</option>
+                </select>
+              </div>
+            ) : null}
+          </div>
         </div>
 
         {isLoading ? <p className="muted">Cargando usuarios...</p> : null}
@@ -4700,6 +9301,8 @@ function AdminUsersPage({ auth }) {
                   organizerStatus: user.organizer_status,
                   isActive: user.is_active,
                 };
+                const roleOptions = allowedRolesForUser(user);
+                const rowCanEdit = canEditUser(user);
 
                 return (
                   <tr key={user.id}>
@@ -4713,8 +9316,17 @@ function AdminUsersPage({ auth }) {
                       </div>
                     </td>
                     <td>
-                      <select value={draft.role} onChange={(event) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], role: event.target.value } }))}>
-                        {["customer", "organizer", "staff", "admin"].map((roleOption) => (
+                      <select
+                        value={draft.role}
+                        disabled={!rowCanEdit || !canEditRole(user)}
+                        onChange={(event) =>
+                          setUserDrafts((prev) => ({
+                            ...prev,
+                            [user.id]: { ...prev[user.id], role: event.target.value },
+                          }))
+                        }
+                      >
+                        {roleOptions.map((roleOption) => (
                           <option key={roleOption} value={roleOption}>
                             {getRoleLabel(roleOption)}
                           </option>
@@ -4722,24 +9334,63 @@ function AdminUsersPage({ auth }) {
                       </select>
                     </td>
                     <td>
-                      <select value={draft.organizerStatus} onChange={(event) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], organizerStatus: event.target.value } }))}>
-                        {["not_requested", "pending", "approved", "rejected"].map((statusOption) => (
-                          <option key={statusOption} value={statusOption}>
-                            {getOrganizerStatusLabel(statusOption)}
-                          </option>
-                        ))}
-                      </select>
+                      {canEditOrganizerStatus(user) && rowCanEdit ? (
+                        <select
+                          value={draft.organizerStatus}
+                          onChange={(event) =>
+                            setUserDrafts((prev) => ({
+                              ...prev,
+                              [user.id]: { ...prev[user.id], organizerStatus: event.target.value },
+                            }))
+                          }
+                        >
+                          {["pending", "approved", "rejected"].map((statusOption) => (
+                            <option key={statusOption} value={statusOption}>
+                              {getOrganizerStatusLabel(statusOption)}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="status-pill">{getOrganizerStatusLabel(draft.organizerStatus)}</span>
+                      )}
                     </td>
                     <td>
                       <label className="checkbox-field inline-checkbox">
-                        <input type="checkbox" checked={Boolean(draft.isActive)} onChange={(event) => setUserDrafts((prev) => ({ ...prev, [user.id]: { ...prev[user.id], isActive: event.target.checked } }))} />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(draft.isActive)}
+                          disabled={!rowCanEdit || !canEditIsActive(user)}
+                          onChange={(event) =>
+                            setUserDrafts((prev) => ({
+                              ...prev,
+                              [user.id]: { ...prev[user.id], isActive: event.target.checked },
+                            }))
+                          }
+                        />
                         <span>{draft.isActive ? "Activo" : "Inactivo"}</span>
                       </label>
                     </td>
                     <td>
-                      <button className="secondary-button" type="button" disabled={savingUserId === user.id} onClick={() => saveUser(user.id)}>
-                        {savingUserId === user.id ? "Guardando..." : "Guardar"}
-                      </button>
+                      <div className="cta-row compact-actions">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={savingUserId === user.id || !rowCanEdit}
+                          onClick={() => saveUser(user.id)}
+                        >
+                          {savingUserId === user.id ? "Guardando..." : "Guardar"}
+                        </button>
+                        {canDeleteUser() ? (
+                          <button
+                            className="ghost-button"
+                            type="button"
+                            disabled={deletingUserId === user.id}
+                            onClick={() => deleteUser(user.id)}
+                          >
+                            {deletingUserId === user.id ? "Eliminando..." : "Eliminar"}
+                          </button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -4748,6 +9399,149 @@ function AdminUsersPage({ auth }) {
           </table>
         </div>
       </section>
+
+      {!isLoading && pagination.totalPages > 0 ? (
+        <div className="market-results-pagination">
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => setPage((currentPage) => Math.max(1, currentPage - 1))}
+            disabled={!pagination.hasPreviousPage}
+          >
+            Anterior
+          </button>
+          <div className="market-pagination-pages">
+            {Array.from({ length: pagination.totalPages }, (_, pageIndex) => {
+              const pageNumber = pageIndex + 1;
+              return (
+                <button
+                  className={`market-pagination-page ${pageNumber === page ? "active" : ""}`}
+                  key={pageNumber}
+                  type="button"
+                  onClick={() => setPage(pageNumber)}
+                >
+                  {pageNumber}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={() => setPage((currentPage) => Math.min(pagination.totalPages, currentPage + 1))}
+            disabled={!pagination.hasNextPage}
+          >
+            Siguiente
+          </button>
+        </div>
+      ) : null}
+
+      {isCreateUserOpen ? (
+        <div
+          className="ticket-preview-overlay"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !isCreatingUser) {
+              closeCreateUserModal();
+            }
+          }}
+        >
+          <div className="ticket-preview-dialog admin-event-modal">
+            <section className="panel-card admin-event-modal-card">
+              <div className="ticket-preview-header">
+                <div>
+                  <p className="eyebrow">Usuarios</p>
+                  <h3>Crear nuevo usuario</h3>
+                  <p className="muted">Crea cuentas para clientes, staff, organizers o administradores.</p>
+                </div>
+                <button className="ghost-button" type="button" onClick={closeCreateUserModal} disabled={isCreatingUser}>
+                  Cerrar
+                </button>
+              </div>
+
+              {createFeedback ? <InlineMessage type="error" message={createFeedback} /> : null}
+
+              <form className="form-grid compact-grid organizer-form" onSubmit={submitCreateUser}>
+                <label className="form-span-2">
+                  Nombre completo
+                  <input
+                    value={createUserDraft.fullName}
+                    onChange={(event) => setCreateUserDraft((prev) => ({ ...prev, fullName: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label className="form-span-2">
+                  Correo
+                  <input
+                    type="email"
+                    value={createUserDraft.email}
+                    onChange={(event) => setCreateUserDraft((prev) => ({ ...prev, email: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label className="form-span-2">
+                  Contrasena
+                  <input
+                    type="password"
+                    value={createUserDraft.password}
+                    onChange={(event) => setCreateUserDraft((prev) => ({ ...prev, password: event.target.value }))}
+                    required
+                  />
+                </label>
+                <label>
+                  Rol
+                  <select
+                    value={createUserDraft.role}
+                    onChange={(event) => {
+                      const nextRole = event.target.value;
+                      setCreateUserDraft((prev) => ({
+                        ...prev,
+                        role: nextRole,
+                        organizerStatus: nextRole === "organizer" ? "approved" : "",
+                      }));
+                    }}
+                    required
+                  >
+                    <option value="customer">Cliente</option>
+                    <option value="organizer">Organizador</option>
+                    <option value="staff">Staff</option>
+                    <option value="admin">Administrador</option>
+                  </select>
+                </label>
+                <label>
+                  Activo
+                  <select
+                    value={createUserDraft.isActive ? "true" : "false"}
+                    onChange={(event) => setCreateUserDraft((prev) => ({ ...prev, isActive: event.target.value === "true" }))}
+                  >
+                    <option value="true">Activo</option>
+                    <option value="false">Inactivo</option>
+                  </select>
+                </label>
+                {createUserDraft.role === "organizer" ? (
+                  <label className="form-span-2">
+                    Estado organizer
+                    <select
+                      value={createUserDraft.organizerStatus || "approved"}
+                      onChange={(event) => setCreateUserDraft((prev) => ({ ...prev, organizerStatus: event.target.value }))}
+                    >
+                      <option value="approved">Aprobado</option>
+                      <option value="pending">Pendiente</option>
+                      <option value="rejected">Rechazado</option>
+                    </select>
+                  </label>
+                ) : null}
+
+                <div className="cta-row compact-actions admin-event-modal-actions form-span-2">
+                  <button className="primary-button" type="submit" disabled={isCreatingUser}>
+                    {isCreatingUser ? "Creando..." : "Crear usuario"}
+                  </button>
+                </div>
+              </form>
+            </section>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -4806,23 +9600,35 @@ function AdminSettingsPage({ auth }) {
 
 function AdminEventReviewPage({ auth }) {
   const [events, setEvents] = useState([]);
+  const [changeRequests, setChangeRequests] = useState([]);
   const [feedback, setFeedback] = useState("");
   const [rejectionReasons, setRejectionReasons] = useState({});
+  const [requestResponses, setRequestResponses] = useState({});
   const [processingId, setProcessingId] = useState(null);
+  const [requestProcessingId, setRequestProcessingId] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
 
   const loadPendingEvents = useCallback(async () => {
     setIsLoading(true);
 
     try {
-      const response = await apiRequest("/events/review/pending", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${auth.token}`,
-        },
-      });
+      const [pendingEventsResponse, pendingRequestsResponse] = await Promise.all([
+        apiRequest("/events/review/pending", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        }),
+        apiRequest("/events/change-requests/review", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        }),
+      ]);
 
-      setEvents(response.data || []);
+      setEvents(pendingEventsResponse.data || []);
+      setChangeRequests(pendingRequestsResponse.data || []);
       setFeedback("");
     } catch (error) {
       setFeedback(getUserFacingErrorMessage(error, "No pudimos cargar los eventos pendientes en este momento."));
@@ -4856,6 +9662,30 @@ function AdminEventReviewPage({ auth }) {
       setFeedback(getUserFacingErrorMessage(error, "No pudimos actualizar el estado del evento."));
     } finally {
       setProcessingId(null);
+    }
+  };
+
+  const reviewChangeRequest = async (requestId, decision) => {
+    setRequestProcessingId(requestId);
+    setFeedback("");
+
+    try {
+      await apiRequest(`/events/change-requests/${requestId}/review`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${auth.token}`,
+        },
+        body: JSON.stringify({
+          decision,
+          adminResponse: requestResponses[requestId] || "",
+        }),
+      });
+
+      await loadPendingEvents();
+    } catch (error) {
+      setFeedback(getUserFacingErrorMessage(error, "No pudimos revisar la solicitud en este momento."));
+    } finally {
+      setRequestProcessingId(null);
     }
   };
 
@@ -4913,6 +9743,123 @@ function AdminEventReviewPage({ auth }) {
                   Aprobar
                 </button>
                 <button className="secondary-button" type="button" disabled={processingId === eventItem.id} onClick={() => reviewEvent(eventItem.id, "reject")}>
+                  Rechazar
+                </button>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <header className="dashboard-section-header">
+        <div>
+          <p className="eyebrow">Solicitudes especiales</p>
+          <h2>Cambios y cancelaciones de eventos publicados</h2>
+        </div>
+      </header>
+
+      {!isLoading && changeRequests.length === 0 ? (
+        <div className="panel-card empty-state compact-state">
+          <h3>No hay solicitudes pendientes</h3>
+          <p className="muted">Cuando un organizer solicite cambios o cancelaciones apareceran aqui.</p>
+        </div>
+      ) : null}
+
+      <div className="dashboard-stack">
+        {changeRequests.map((requestItem, index) => (
+          <article className="panel-card review-card" key={`request-${requestItem.id}`}>
+            <div className="review-card-media">
+              <img
+                src={requestItem.featured_image_url || EVENT_FALLBACK_IMAGES[index % EVENT_FALLBACK_IMAGES.length]}
+                alt={requestItem.event_title}
+              />
+            </div>
+            <div className="review-card-copy">
+              <div className="panel-card-header">
+                <div>
+                  <h3>{requestItem.event_title}</h3>
+                  <p className="muted">
+                    {requestItem.organizer_name || requestItem.organizer_email || "Organizer"} · {getChangeRequestTypeLabel(requestItem.request_type)}
+                  </p>
+                </div>
+                <span className="status-pill pending_review">{getChangeRequestStatusLabel(requestItem.status)}</span>
+              </div>
+
+              <p className="muted">{requestItem.explanation}</p>
+
+              <div className="change-request-diff-list compact-request-list">
+                {(requestItem.change_summary || []).map((item) => (
+                  <article className="change-request-diff-item" key={`summary-${requestItem.id}-${item.field}`}>
+                    <div className="change-request-diff-header">
+                      <strong>{item.label}</strong>
+                      {item.isSensitive ? <span className="status-pill pending_review">Sensible</span> : null}
+                    </div>
+                    <div className="change-request-diff-values">
+                      <div>
+                        <span>Antes</span>
+                        <p>{formatChangeRequestValue(item.before)}</p>
+                      </div>
+                      <div>
+                        <span>Despues</span>
+                        <p>{formatChangeRequestValue(item.after)}</p>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              {(requestItem.attachments || []).length ? (
+                <div className="change-request-attachment-list">
+                  {requestItem.attachments.map((attachment) => (
+                    <a
+                      className="change-request-attachment-item attachment-link"
+                      download={attachment.name}
+                      href={attachment.dataUrl}
+                      key={`${requestItem.id}-${attachment.name}`}
+                    >
+                      <div>
+                        <strong>{attachment.name}</strong>
+                        <span>{formatFileSize(attachment.size)} · {attachment.mimeType}</span>
+                      </div>
+                      <span>Descargar</span>
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+
+              <label>
+                Respuesta administrativa
+                <textarea
+                  rows="3"
+                  value={requestResponses[requestItem.id] || ""}
+                  onChange={(event) => setRequestResponses((prev) => ({ ...prev, [requestItem.id]: event.target.value }))}
+                  placeholder="Indica observaciones, informacion faltante o justificacion de rechazo."
+                />
+              </label>
+
+              <div className="cta-row compact-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={requestProcessingId === requestItem.id}
+                  onClick={() => reviewChangeRequest(requestItem.id, "approve")}
+                >
+                  Aprobar
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={requestProcessingId === requestItem.id}
+                  onClick={() => reviewChangeRequest(requestItem.id, "needs_information")}
+                >
+                  Pedir informacion
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  disabled={requestProcessingId === requestItem.id}
+                  onClick={() => reviewChangeRequest(requestItem.id, "reject")}
+                >
                   Rechazar
                 </button>
               </div>
@@ -5094,7 +10041,7 @@ function TermsPage() {
 }
 
 function NotFoundPage({ auth }) {
-  const returnPath = auth.currentUser ? getRoleHomePath(auth.currentUser.role) : "/";
+  const returnPath = auth.currentUser ? getRoleHomePath(auth.currentUser.role, auth.currentUser) : "/";
 
   return (
     <div className="public-shell app-shell">
@@ -5117,13 +10064,76 @@ function NotFoundPage({ auth }) {
   );
 }
 
-function ProtectedRoute({ token, currentUser, allowedRoles, children }) {
+function AccessDeniedPage({ auth }) {
+  const location = useLocation();
+  const homePath = getRoleHomePath(auth.currentUser?.role, auth.currentUser);
+  const attemptedPath = typeof location.state?.from === "string" ? location.state.from : "";
+
+  return (
+    <div className="public-shell app-shell">
+      <section className="page-section not-found-page">
+        <div className="card state-card split-state-card">
+          <div className="state-visual">
+            <img src={NOT_FOUND_IMAGE} alt="Acceso denegado" />
+          </div>
+          <div className="state-copy">
+            <p className="eyebrow">403</p>
+            <h2>Acceso denegado</h2>
+            <p className="muted">Tu cuenta no tiene permisos para ingresar a esa seccion.</p>
+            {attemptedPath ? <p className="muted">Ruta solicitada: {attemptedPath}</p> : null}
+            <div className="cta-row">
+              <Link className="primary-button" to={homePath}>
+                Volver a mi panel
+              </Link>
+              <Link className="secondary-button" to="/">
+                Ir al inicio
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProtectedRoute({ token, currentUser, allowedRoles, requireSuperAdmin, children }) {
+  const location = useLocation();
+
   if (!token) {
-    return <Navigate to="/login" replace />;
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{
+          returnTo: `${location.pathname}${location.search}`,
+          authMessage: "Inicia sesion para continuar.",
+        }}
+      />
+    );
   }
 
   if (allowedRoles?.length && currentUser && !allowedRoles.includes(currentUser.role)) {
-    return <Navigate to={getRoleHomePath(currentUser.role)} replace />;
+    return (
+      <Navigate
+        to="/access-denied"
+        replace
+        state={{
+          from: `${location.pathname}${location.search}`,
+        }}
+      />
+    );
+  }
+
+  if (requireSuperAdmin && !currentUser?.is_super_admin) {
+    return (
+      <Navigate
+        to="/access-denied"
+        replace
+        state={{
+          from: `${location.pathname}${location.search}`,
+        }}
+      />
+    );
   }
 
   return children || <Outlet />;
@@ -5144,7 +10154,7 @@ function PublicOnlyRoute({ token, children }) {
 }
 
 function RoleDashboardRedirect({ auth }) {
-  return <Navigate to={getRoleHomePath(auth.currentUser?.role)} replace />;
+  return <Navigate to={getRoleHomePath(auth.currentUser?.role, auth.currentUser)} replace />;
 }
 
 function FormCard({ title, description, feedback, children }) {

@@ -12,5 +12,7 @@ necesario.txt
 Thumbs.db
 .idea/
 .vscode/
+*.pdf
+docs_guide/sensible.txt
 *.md
 !Documentacion_presentacion_final.md

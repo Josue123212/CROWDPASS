@@ -14,6 +14,21 @@ const ALLOWED_SALES_END_MODES = [
   "two_days_before",
   "custom",
 ];
+const ALLOWED_EVENT_SORTS = ["upcoming", "price_asc", "price_desc"];
+
+function parsePagination(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) || parsed < 1 ? fallback : parsed;
+}
+
+function parseOptionalNumber(value) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 function parseNumber(value, fieldName) {
   const parsed = Number(value);
@@ -161,19 +176,35 @@ function validateEventPayload(payload) {
 }
 
 async function listEvents(req, res) {
+  const page = parsePagination(req.query.page, 1);
+  const limit = Math.min(parsePagination(req.query.limit, 12), 50);
+  const sort = ALLOWED_EVENT_SORTS.includes(req.query.sort) ? req.query.sort : "upcoming";
   const filters = {
     category: req.query.category?.trim(),
-    city: req.query.city ? `%${req.query.city.trim()}%` : undefined,
+    city: req.query.city?.trim(),
+    venue: req.query.venue?.trim(),
     query: req.query.q?.trim(),
     startDate: req.query.startDate,
     endDate: req.query.endDate,
-    minPrice: req.query.minPrice ? Number(req.query.minPrice) : undefined,
-    maxPrice: req.query.maxPrice ? Number(req.query.maxPrice) : undefined,
+    minPrice: parseOptionalNumber(req.query.minPrice),
+    maxPrice: parseOptionalNumber(req.query.maxPrice),
+    freeOnly: req.query.freeOnly === "true",
+    sort,
+    page,
+    limit,
   };
-  const events = await eventService.getEvents(filters);
+  const result = await eventService.getEvents(filters);
   return success(res, {
     message: "Eventos obtenidos correctamente.",
-    data: events,
+    data: result.items,
+    meta: {
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      totalPages: result.totalPages,
+      hasNextPage: result.page < result.totalPages,
+      hasPreviousPage: result.page > 1,
+    },
   });
 }
 
@@ -217,6 +248,50 @@ async function updateEvent(req, res) {
   });
 }
 
+async function listOwnChangeRequests(req, res) {
+  const requests = await eventService.listOwnChangeRequests(req.user);
+  return success(res, {
+    message: "Solicitudes del organizer obtenidas correctamente.",
+    data: requests,
+  });
+}
+
+async function createChangeRequest(req, res) {
+  const { requestType, explanation, attachments } = req.body;
+
+  if (!["update", "cancellation"].includes(requestType)) {
+    throw new ApiError(400, "El tipo de solicitud enviado es invalido.");
+  }
+
+  const normalizedPayload =
+    requestType === "update"
+      ? validateEventPayload(req.body.eventData || {})
+      : null;
+
+  const createdRequest = await eventService.submitChangeRequest(
+    req.params.id,
+    {
+      requestType,
+      explanation,
+      attachments,
+      proposedEventData: normalizedPayload,
+    },
+    req.user
+  );
+
+  return success(
+    res,
+    {
+      message:
+        requestType === "cancellation"
+          ? "Solicitud de cancelacion enviada correctamente."
+          : "Solicitud de cambios enviada correctamente.",
+      data: createdRequest,
+    },
+    201
+  );
+}
+
 async function listPendingReviewEvents(req, res) {
   const events = await eventService.getPendingReviewEvents();
   return success(res, {
@@ -230,6 +305,14 @@ async function listOrganizerEvents(req, res) {
   return success(res, {
     message: "Eventos del organizador obtenidos correctamente.",
     data: events,
+  });
+}
+
+async function listPendingChangeRequests(req, res) {
+  const requests = await eventService.listPendingChangeRequests(req.user);
+  return success(res, {
+    message: "Solicitudes pendientes obtenidas correctamente.",
+    data: requests,
   });
 }
 
@@ -255,11 +338,93 @@ async function reviewEvent(req, res) {
   });
 }
 
+async function reviewChangeRequest(req, res) {
+  const { decision, adminResponse } = req.body;
+
+  if (!["approve", "reject", "needs_information"].includes(decision)) {
+    throw new ApiError(400, "La decision enviada es invalida.");
+  }
+
+  const reviewedRequest = await eventService.reviewChangeRequest(
+    req.params.id,
+    {
+      decision,
+      adminResponse,
+    },
+    req.user
+  );
+
+  return success(res, {
+    message: "Solicitud revisada correctamente.",
+    data: reviewedRequest,
+  });
+}
+
 async function deleteEvent(req, res) {
   const deletedEvent = await eventService.removeEvent(req.params.id, req.user);
   return success(res, {
     message: "Evento eliminado correctamente.",
     data: deletedEvent,
+  });
+}
+
+async function disableEvent(req, res) {
+  const updatedEvent = await eventService.disableEvent(req.params.id, req.user, {
+    reason: req.body?.reason,
+  });
+  return success(res, {
+    message: "Evento deshabilitado correctamente.",
+    data: updatedEvent,
+  });
+}
+
+async function cancelEvent(req, res) {
+  const result = await eventService.cancelEvent(req.params.id, req.user, {
+    reason: req.body?.reason,
+  });
+  return success(res, {
+    message: "Evento cancelado correctamente.",
+    data: result.event,
+    meta: { refundsEnqueued: result.refundsEnqueued || 0 },
+  });
+}
+
+async function listCommunicationTargets(req, res) {
+  const result = await eventService.listCommunicationTargets(Number(req.params.id), req.user);
+  return success(res, {
+    message: "Afectados del evento obtenidos correctamente.",
+    data: result,
+  });
+}
+
+async function listEventCancellations(req, res) {
+  const page = Number(req.query.page || 1);
+  const limit = Number(req.query.limit || 12);
+  const result = await eventService.listCancelledEventsWithRefundProgress({ page, limit }, req.user);
+
+  return success(res, {
+    message: "Cancelaciones obtenidas correctamente.",
+    data: result.items,
+    meta: {
+      page: result.page,
+      limit: result.limit,
+      total: result.total,
+      totalPages: result.totalPages,
+      hasNextPage: result.page < result.totalPages,
+      hasPreviousPage: result.page > 1,
+    },
+  });
+}
+
+async function retryRejectedEventRefunds(req, res) {
+  const eventId = Number(req.params.id);
+  const limit = req.body?.limit;
+  const notes = req.body?.notes;
+  const result = await eventService.retryRejectedEventCancellationRefunds(eventId, { limit, notes }, req.user);
+
+  return success(res, {
+    message: "Reembolsos rechazados reprogramados correctamente.",
+    data: result,
   });
 }
 
@@ -269,8 +434,17 @@ module.exports = {
   getEvent,
   createEvent,
   updateEvent,
+  listOwnChangeRequests,
+  createChangeRequest,
   listOrganizerEvents,
   listPendingReviewEvents,
+  listPendingChangeRequests,
   reviewEvent,
+  reviewChangeRequest,
+  disableEvent,
+  cancelEvent,
+  listEventCancellations,
+  retryRejectedEventRefunds,
+  listCommunicationTargets,
   deleteEvent,
 };

@@ -37,8 +37,17 @@ function requireRoles(...roles) {
   };
 }
 
+function requireSuperAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin" || req.user.is_super_admin !== true) {
+    return next(new ApiError(403, "No tienes permisos para realizar esta accion."));
+  }
+
+  return next();
+}
+
 module.exports = {
   authenticate,
   requireAdmin,
   requireRoles,
+  requireSuperAdmin,
 };

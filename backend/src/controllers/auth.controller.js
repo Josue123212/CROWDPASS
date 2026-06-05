@@ -169,8 +169,20 @@ async function login(req, res) {
   });
 }
 
+async function superadminLogin(req, res) {
+  const { email, password } = req.body;
+  validateAuthPayload({ email, password }, false);
+
+  const result = await authService.loginSuperAdmin({ email, password });
+  return success(res, {
+    message: "Inicio de sesion super admin exitoso.",
+    data: result,
+  });
+}
+
 module.exports = {
   register,
   checkAvailability,
   login,
+  superadminLogin,
 };

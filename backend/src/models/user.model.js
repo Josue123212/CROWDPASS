@@ -112,21 +112,112 @@ async function findById(id) {
   return result.rows[0] || null;
 }
 
-async function countUsers() {
-  const result = await db.query("SELECT COUNT(*)::int AS total FROM users");
+function buildUsersListFilters({ organizerStatus, group, includeAdmins }) {
+  const conditions = [];
+  const params = [];
+
+  if (!includeAdmins) {
+    conditions.push(`role <> $${params.length + 1}`);
+    params.push("admin");
+  }
+
+  if (group === "customers") {
+    conditions.push(`role = $${params.length + 1}`);
+    params.push("customer");
+    conditions.push(`organizer_status = $${params.length + 1}`);
+    params.push("not_requested");
+  } else if (group === "staff") {
+    conditions.push(`role = $${params.length + 1}`);
+    params.push("staff");
+  } else if (group === "organizers") {
+    conditions.push(
+      `(role = $${params.length + 1} OR (role = $${params.length + 2} AND organizer_status <> $${params.length + 3}))`
+    );
+    params.push("organizer", "customer", "not_requested");
+  } else if (group === "admins") {
+    conditions.push(`role = $${params.length + 1}`);
+    params.push("admin");
+  }
+
+  if (organizerStatus) {
+    conditions.push(`organizer_status = $${params.length + 1}`);
+    params.push(organizerStatus);
+  }
+
+  return { conditions, params };
+}
+
+async function countUsers({ organizerStatus, group, includeAdmins = false } = {}) {
+  let query = "SELECT COUNT(*)::int AS total FROM users";
+  const { conditions, params } = buildUsersListFilters({ organizerStatus, group, includeAdmins });
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(" AND ")}`;
+  }
+
+  const result = await db.query(query, params);
   return result.rows[0]?.total || 0;
 }
 
-async function listUsers({ limit, offset }) {
+async function countOwnedEvents(userId) {
   const result = await db.query(
-    `SELECT ${USER_BASE_FIELDS}
-     FROM users
-     ORDER BY created_at DESC
-     LIMIT $1 OFFSET $2`,
-    [limit, offset]
+    `SELECT COUNT(*)::int AS total
+     FROM events
+     WHERE organizer_id = $1`,
+    [userId]
   );
 
+  return result.rows[0]?.total || 0;
+}
+
+async function countReservationsByUser(userId) {
+  const result = await db.query(
+    `SELECT COUNT(*)::int AS total
+     FROM reservations
+     WHERE user_id = $1`,
+    [userId]
+  );
+
+  return result.rows[0]?.total || 0;
+}
+
+async function listUsers({ limit, offset, organizerStatus, group, includeAdmins = false }) {
+  let query = `SELECT ${USER_BASE_FIELDS} FROM users`;
+  const { conditions, params } = buildUsersListFilters({ organizerStatus, group, includeAdmins });
+
+  if (conditions.length > 0) {
+    query += ` WHERE ${conditions.join(" AND ")}`;
+  }
+
+  query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  params.push(limit, offset);
+
+  const result = await db.query(query, params);
+
   return result.rows;
+}
+
+async function listUserIdsByRoles(roles = [], { onlyActive = true } = {}) {
+  const normalizedRoles = Array.from(new Set((Array.isArray(roles) ? roles : []).map((role) => String(role).trim()).filter(Boolean)));
+  if (normalizedRoles.length === 0) {
+    return [];
+  }
+
+  const params = [normalizedRoles];
+  const conditions = ["role = ANY($1::text[])"];
+
+  if (onlyActive) {
+    conditions.push(`is_active = TRUE`);
+  }
+
+  const result = await db.query(
+    `SELECT id
+     FROM users
+     WHERE ${conditions.join(" AND ")}`,
+    params
+  );
+
+  return (result.rows || []).map((row) => Number(row.id)).filter(Boolean);
 }
 
 async function updateUserProfile(
@@ -206,7 +297,10 @@ module.exports = {
   findByPhone,
   findById,
   countUsers,
+  countOwnedEvents,
+  countReservationsByUser,
   listUsers,
+  listUserIdsByRoles,
   updateUserProfile,
   requestOrganizerRole,
   updateAdminUser,

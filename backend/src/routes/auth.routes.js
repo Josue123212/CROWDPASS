@@ -8,5 +8,6 @@ const router = express.Router();
 router.post("/check-availability", availabilityRateLimit, asyncHandler(authController.checkAvailability));
 router.post("/register", authRateLimit, asyncHandler(authController.register));
 router.post("/login", authRateLimit, asyncHandler(authController.login));
+router.post("/superadmin-login", authRateLimit, asyncHandler(authController.superadminLogin));
 
 module.exports = router;

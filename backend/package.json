@@ -8,7 +8,11 @@
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:auth": "jest --runInBand tests/auth.routes.test.js",
-    "test:health": "jest --runInBand tests/app.test.js"
+    "test:health": "jest --runInBand tests/app.test.js",
+    "test:selenium:customer": "node selenium.customer.e2e.js",
+    "test:selenium:staff": "node selenium.staff.e2e.js",
+    "test:selenium:admin": "node selenium.admin.e2e.js",
+    "test:selenium:organizer": "node selenium.organizer.e2e.js"
   },
   "keywords": [],
   "author": "",
@@ -22,11 +26,14 @@
     "express-rate-limit": "^8.5.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "pdfkit": "^0.18.0",
     "pexels": "^1.4.0",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "jest": "^30.4.2",
+    "selenium-webdriver": "^4.35.0",
     "nodemon": "^3.1.14",
     "supertest": "^7.2.2"
   }
