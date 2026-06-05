@@ -216,6 +216,19 @@ async function apiRequest(path, options = {}) {
         ...optionHeaders,
       };
   const requestOptions = { ...options };
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : 8000;
+  let timeoutId = null;
+  let abortController = null;
+
+  if (requestOptions.timeoutMs !== undefined) {
+    delete requestOptions.timeoutMs;
+  }
+
+  if (!requestOptions.signal && typeof AbortController !== "undefined" && timeoutMs > 0) {
+    abortController = new AbortController();
+    requestOptions.signal = abortController.signal;
+    timeoutId = window.setTimeout(() => abortController.abort(), timeoutMs);
+  }
 
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
@@ -223,10 +236,15 @@ async function apiRequest(path, options = {}) {
       headers: requestHeaders,
     });
   } catch (error) {
-    const networkError = new Error("No pudimos conectar con el servidor.");
+    const isAbort = String(error?.name || "") === "AbortError";
+    const networkError = new Error(isAbort ? "Tiempo de espera agotado al conectar con el servidor." : "No pudimos conectar con el servidor.");
     networkError.isConnectionError = true;
     networkError.cause = error;
     throw networkError;
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
   }
 
   let payload;
@@ -2919,36 +2937,42 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
 
 function PublicLayout({ auth }) {
   return (
-    <div className="public-shell app-shell marketplace-shell">
-      <MarketplaceTopbar auth={auth} />
+    <>
+      <MaintenanceRedirect auth={auth} />
+      <div className="public-shell app-shell marketplace-shell">
+        <MarketplaceTopbar auth={auth} />
 
-      <main className="page-content">
-        <Outlet />
-      </main>
+        <main className="page-content">
+          <Outlet />
+        </main>
 
-      <footer className="public-footer">
-        <p>© 2026 CrowdPass. Plataforma para descubrir, publicar y reservar experiencias.</p>
-        <div className="public-footer-links">
-          <Link to="/events">Descubrir</Link>
-          <Link to="/terms">Terminos y condiciones</Link>
-          <span>Soporte</span>
-        </div>
-      </footer>
-    </div>
+        <footer className="public-footer">
+          <p>© 2026 CrowdPass. Plataforma para descubrir, publicar y reservar experiencias.</p>
+          <div className="public-footer-links">
+            <Link to="/events">Descubrir</Link>
+            <Link to="/terms">Terminos y condiciones</Link>
+            <span>Soporte</span>
+          </div>
+        </footer>
+      </div>
+    </>
   );
 }
 
 function MemberLayout({ auth }) {
   return (
-    <div className="public-shell app-shell marketplace-shell member-shell">
-      <MarketplaceTopbar auth={auth} showMemberLink />
+    <>
+      <MaintenanceRedirect auth={auth} />
+      <div className="public-shell app-shell marketplace-shell member-shell">
+        <MarketplaceTopbar auth={auth} showMemberLink />
 
-      <main className="page-content">
-        <section className="dashboard-content">
-          <Outlet />
-        </section>
-      </main>
-    </div>
+        <main className="page-content">
+          <section className="dashboard-content">
+            <Outlet />
+          </section>
+        </main>
+      </div>
+    </>
   );
 }
 
