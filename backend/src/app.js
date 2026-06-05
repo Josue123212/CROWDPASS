@@ -23,6 +23,10 @@ function normalizeOrigin(value) {
 }
 
 const allowedOrigins = new Set(env.corsOrigins.map(normalizeOrigin));
+const vercelPreviewPrefixes = env.corsOrigins
+  .map(normalizeOrigin)
+  .filter((origin) => origin.endsWith(".vercel.app"))
+  .map((origin) => origin.replace(/\.vercel\.app$/, ""));
 
 const corsOptions = {
   origin(origin, callback) {
@@ -35,6 +39,14 @@ const corsOptions = {
     const normalized = normalizeOrigin(origin);
 
     if (allowedOrigins.has(normalized)) {
+      callback(null, true);
+      return;
+    }
+
+    if (
+      normalized.endsWith(".vercel.app") &&
+      vercelPreviewPrefixes.some((prefix) => prefix && normalized.startsWith(prefix))
+    ) {
       callback(null, true);
       return;
     }
