@@ -666,67 +666,67 @@ Figure 62:
 K6 results for an increased range (up to 5000 virtual users), or staged ramp evidence showing system behavior under higher load.
 
 5.2.6 Week 12 (80%) requirements mapping (verbatim + module evidence)
-The following checklist is presented verbatim from the evaluation guide (Week 12) and mapped to the implemented modules and required evidence.
+The following checklist is presented verbatim in Spanish (as provided in the evaluation guide for Week 12) and mapped to the implemented modules and required evidence, including an English translation for clarity.
 
-- CRUD completo y funcional.
+- Requirement (verbatim): "CRUD completo y funcional." (Complete and functional CRUD.)
   Backend: CRUD modules implemented for core entities and operational modules.
   Database: complete schema deployed and functional.
   Frontend: screens available to exercise CRUD flows by role.
   Evidence: Figures 50, 52, 55, 57.
 
-- Control de paginados con tiempos de respuesta cómodos al cliente.
+- Requirement (verbatim): "Control de paginados con tiempos de respuesta cómodos al cliente." (Pagination control with comfortable response times.)
   Backend: listing endpoints return paginated data; API limits are enforced by query parameters.
   Frontend: list views consume paginated endpoints.
   Evidence: Figure 50 and an additional screenshot showing page navigation in the UI.
 
-- Manejo de múltiples tipos de usuario.
+- Requirement (verbatim): "Manejo de múltiples tipos de usuario." (Multiple user types.)
   Backend: roles enforced with middleware authorization.
   Frontend: role-based dashboards and navigation.
   Evidence: Figure 51 and a role-based navigation screenshot.
 
-- Proyecto subido al servidor, revisión de pruebas tal sea el caso.
+- Requirement (verbatim): "Proyecto subido al servidor, revisión de pruebas tal sea el caso." (Project deployed to servers; tests reviewed as applicable.)
   Backend: deployed on Render.
   Frontend: deployed on Vercel.
   Database: deployed on Neon.
   Evidence: Figures 49, 53, 56.
 
-- Base de datos completa, conectada y funcional, mostrar diagrama en documentación.
+- Requirement (verbatim): "Base de datos completa, conectada y funcional, mostrar diagrama en documentación." (Complete, connected, functional database; include diagram.)
   Database: complete schema, constraints, and seeded data in Neon.
   Evidence: Figures 53, 54, 55 and the editable DB diagram reference used by the team.
 
-- CORS configurados para no aceptar peticiones de orígenes inesperados.
+- Requirement (verbatim): "CORS configurados para no aceptar peticiones de orígenes inesperados." (CORS restricted to expected origins.)
   Backend: whitelist-based CORS policy using `CORS_ORIGINS`, compatible with production and preview origins.
   Evidence: screenshot of Render environment variables + a successful preflight response.
 
-- Realizar pruebas previas para evitar una caída inesperada en el servidor o sus servicios.
+- Requirement (verbatim): "Realizar pruebas previas para evitar una caída inesperada en el servidor o sus servicios." (Run pre-tests to avoid unexpected service outages.)
   Testing: K6 staged load tests executed before review; degraded-mode behavior documented if saturation is reached.
   Evidence: Figures 61 and 62.
 
-- Autentificación y autorización debidamente implementados sea el caso.
+- Requirement (verbatim): "Autentificación y autorización debidamente implementados sea el caso." (Authentication and authorization properly implemented.)
   Backend: JWT authentication and role authorization for protected routes.
   Frontend: session handling and protected navigation aligned with backend permissions.
   Evidence: Figures 52 and 51.
 
-- Ingreso mediante una cuenta de correo.
+- Requirement (verbatim): "Ingreso mediante una cuenta de correo." (Login using an email account.)
   Backend: login via email + password (`POST /api/auth/login`).
   Frontend: login form through the deployed UI.
   Evidence: Figure 52 and a frontend login screenshot.
 
-- Manejar control de token expirados para mejora de seguridad, así como evitar acceder a rutas manualmente sin permiso.
+- Requirement (verbatim): "Manejar control de token expirados para mejora de seguridad, así como evitar acceder a rutas manualmente sin permiso." (Handle expired tokens and prevent manual unauthorized route access.)
   Backend: JWT expiration configured and invalid/expired token requests rejected with consistent status codes.
   Frontend: unauthorized requests lead to session clearing and redirect to login (controlled UX).
   Evidence: screenshot showing a 401 response handling and redirect behavior.
 
-- Mostrar pantallas de errores previstos como caídas de servidor y respuestas a estos.
+- Requirement (verbatim): "Mostrar pantallas de errores previstos como caídas de servidor y respuestas a estos." (Show expected error screens for downtime and related responses.)
   Frontend: 404 page and maintenance/service unavailable view.
   Backend: structured error responses.
   Evidence: Figure 58 plus screenshots of the maintenance screen and 404 screen.
 
-- Pruebas de test en el servidor con el proyecto en variables de aproximadamente 1000 - 5000.
+- Requirement (verbatim): "Pruebas de test en el servidor con el proyecto en variables de aproximadamente 1000 - 5000." (Server tests with approximately 1000-5000 virtual users.)
   Testing: K6 concurrency evidence executed against the deployment, with staged results and thresholds.
   Evidence: Figures 61 and 62.
 
-- Control de backups sea el caso.
+- Requirement (verbatim): "Control de backups sea el caso." (Backup control as applicable.)
   Database: Neon backup strategy described, including provider-level backup capabilities and operational plan for recovery.
   Evidence: screenshot from Neon dashboard showing backup/retention configuration (or provider backup section) and a short written plan.
 
