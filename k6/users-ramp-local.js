@@ -1,20 +1,57 @@
 import http from "k6/http";
 import { check, sleep } from "k6";
 
+function normalizeBaseUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^`|`$/g, "")
+    .replace(/^"|"$/g, "")
+    .replace(/^'|'$/g, "")
+    .replace(/\/+$/g, "");
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeTarget(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) {
+    return "categories";
+  }
+  if (raw === "health" || raw === "categories" || raw === "events" || raw === "users") {
+    return raw;
+  }
+  return "categories";
+}
+
+const TARGET = normalizeTarget(__ENV.TARGET);
+const baseUrl = normalizeBaseUrl(__ENV.BASE_URL) || "http://localhost:3000";
+const requestTimeout = String(__ENV.REQ_TIMEOUT || "10s");
+
+const maxVus = parsePositiveInt(__ENV.MAX_VUS, 1000);
+const rampStep = parsePositiveInt(__ENV.RAMP_STEP, 250);
+const rampDuration = String(__ENV.RAMP_DURATION || "30s");
+const holdDuration = String(__ENV.HOLD_DURATION || "30s");
+
 export const options = {
   scenarios: {
     users_resource_ramp: {
       executor: "ramping-vus",
       startVUs: 0,
-      stages: [
-        { duration: "30s", target: 100 },
-        { duration: "30s", target: 300 },
-        { duration: "30s", target: 600 },
-        { duration: "30s", target: 900 },
-        { duration: "30s", target: 1200 },
-        { duration: "30s", target: 1200 },
-        { duration: "20s", target: 0 },
-      ],
+      stages: (() => {
+        const stages = [];
+        let current = Math.min(100, maxVus);
+        while (current < maxVus) {
+          stages.push({ duration: rampDuration, target: current });
+          current = Math.min(current + rampStep, maxVus);
+        }
+        stages.push({ duration: rampDuration, target: maxVus });
+        stages.push({ duration: holdDuration, target: maxVus });
+        stages.push({ duration: "20s", target: 0 });
+        return stages;
+      })(),
       gracefulRampDown: "10s",
     },
   },
@@ -24,13 +61,16 @@ export const options = {
   },
 };
 
-const baseUrl = __ENV.BASE_URL || "http://localhost:3000";
 const adminEmail = __ENV.ADMIN_EMAIL || "captura.register2@crowdpass.com";
 const adminPassword = __ENV.ADMIN_PASSWORD || "Password123*";
 const usersPage = __ENV.USERS_PAGE || "1";
 const usersLimit = __ENV.USERS_LIMIT || "12";
 
 export function setup() {
+  if (TARGET !== "users") {
+    return { token: "" };
+  }
+
   const loginPayload = JSON.stringify({
     email: adminEmail,
     password: adminPassword,
@@ -40,6 +80,7 @@ export function setup() {
     headers: {
       "Content-Type": "application/json",
     },
+    timeout: requestTimeout,
   });
 
   check(loginResponse, {
@@ -63,24 +104,33 @@ export function setup() {
 }
 
 export default function (data) {
-  const usersResponse = http.get(
-    `${baseUrl}/api/users?page=${usersPage}&limit=${usersLimit}`,
-    {
-      headers: {
-        Authorization: `Bearer ${data.token}`,
-      },
-    }
-  );
+  const url =
+    TARGET === "health"
+      ? `${baseUrl}/api/health`
+      : TARGET === "events"
+        ? `${baseUrl}/api/events?page=1&limit=12`
+        : TARGET === "users"
+          ? `${baseUrl}/api/users?page=${usersPage}&limit=${usersLimit}`
+          : `${baseUrl}/api/events/categories`;
 
-  check(usersResponse, {
-    "users responde 200": (response) => response.status === 200,
-    "users entrega arreglo": (response) => {
-      try {
-        return Array.isArray(response.json("data"));
-      } catch {
-        return false;
-      }
-    },
+  const params =
+    TARGET === "users"
+      ? {
+          headers: {
+            Authorization: `Bearer ${data.token}`,
+          },
+          timeout: requestTimeout,
+          tags: { name: "users" },
+        }
+      : {
+          timeout: requestTimeout,
+          tags: { name: TARGET },
+        };
+
+  const response = http.get(url, params);
+
+  check(response, {
+    "request responde 200": (currentResponse) => currentResponse.status === 200,
   });
 
   sleep(1);
