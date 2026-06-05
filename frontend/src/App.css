@@ -1900,6 +1900,23 @@
   margin: 0;
 }
 
+.home-sidebar-card .activity-item {
+  flex-wrap: wrap;
+}
+
+.home-sidebar-card .activity-item > div {
+  min-width: 0;
+}
+
+.home-sidebar-card .activity-item .status-pill {
+  margin-left: 0 !important;
+  margin-top: 10px;
+}
+
+.home-sidebar-card .activity-item small {
+  overflow-wrap: anywhere;
+}
+
 .home-sidebar-card-copy {
   display: grid;
   gap: 10px;
