@@ -777,6 +777,7 @@
   justify-content: flex-end;
   min-width: 0;
   flex: 0 0 auto;
+  flex-wrap: wrap;
 }
 
 .market-search-shell {
@@ -4526,6 +4527,90 @@
     top: 128px;
     width: calc(100vw - 20px);
     border-radius: 24px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-shell {
+    width: min(100%, calc(100% - 12px));
+  }
+
+  .public-topbar {
+    padding: 14px 16px;
+    border-radius: 18px;
+  }
+
+  .brand-mark {
+    font-size: 1.25rem;
+  }
+
+  .nav-links a,
+  .subtle-link,
+  .ghost-button,
+  .primary-button,
+  .secondary-button {
+    min-height: 42px;
+    padding: 0 14px;
+  }
+
+  .market-topbar-inner {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "brand"
+      "actions"
+      "search";
+  }
+
+  .market-topbar-actions {
+    justify-content: flex-start;
+  }
+
+  .navbar-notifications-link {
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .navbar-notifications-count {
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    font-size: 0.75rem;
+  }
+
+  .navbar-avatar-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .auth-content,
+  .auth-visual-copy {
+    padding: 22px;
+  }
+
+  .auth-visual {
+    min-height: 360px;
+  }
+
+  .input-prefix-label {
+    min-width: 56px;
+    padding: 0 10px;
+  }
+
+  .password-toggle {
+    width: 36px;
+    height: 36px;
+  }
+
+  .dashboard-sidebar {
+    padding: 20px 14px;
+  }
+
+  .dashboard-main {
+    padding: 18px 12px 24px;
+  }
+
+  .data-table {
+    min-width: 640px;
   }
 }
 
