@@ -27,11 +27,11 @@ INSERT INTO users (
   accepts_marketing
 )
 VALUES
-  ('Admin CrowdPass', 'admin@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'admin', 'Peru', 'Lima', 'unspecified', 'approved', TRUE, FALSE),
-  ('Organizador Demo', 'organizer@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'organizer', 'Peru', 'Lima', 'male', 'approved', TRUE, TRUE),
-  ('Customer CrowdPass', 'customer@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'customer', 'Peru', 'Lima', 'unspecified', 'not_requested', TRUE, TRUE),
-  ('Cliente Demo', 'client@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'customer', 'Peru', 'Arequipa', 'female', 'not_requested', TRUE, TRUE),
-  ('Staff Demo', 'staff@crowdpass.com', '$2b$10$bgbt6YDgzPyQuhz59EOe6O/U6WPNZ.d.Wi6l4gKqWvG5PldjVg.pq', 'staff', 'Peru', 'Lima', 'other', 'not_requested', TRUE, FALSE)
+  ('Admin CrowdPass', 'admin@crowdpass.com', '$2b$10$tU13d.APuiqb2FBvAlfDnOlN8EpheJV5xPU2qV4LKjGFwwYKzTbhK', 'admin', 'Peru', 'Lima', 'unspecified', 'approved', TRUE, FALSE),
+  ('Organizador Demo', 'organizer@crowdpass.com', '$2b$10$tU13d.APuiqb2FBvAlfDnOlN8EpheJV5xPU2qV4LKjGFwwYKzTbhK', 'organizer', 'Peru', 'Lima', 'male', 'approved', TRUE, TRUE),
+  ('Customer CrowdPass', 'customer@crowdpass.com', '$2b$10$tU13d.APuiqb2FBvAlfDnOlN8EpheJV5xPU2qV4LKjGFwwYKzTbhK', 'customer', 'Peru', 'Lima', 'unspecified', 'not_requested', TRUE, TRUE),
+  ('Cliente Demo', 'client@crowdpass.com', '$2b$10$tU13d.APuiqb2FBvAlfDnOlN8EpheJV5xPU2qV4LKjGFwwYKzTbhK', 'customer', 'Peru', 'Arequipa', 'female', 'not_requested', TRUE, TRUE),
+  ('Staff Demo', 'staff@crowdpass.com', '$2b$10$tU13d.APuiqb2FBvAlfDnOlN8EpheJV5xPU2qV4LKjGFwwYKzTbhK', 'staff', 'Peru', 'Lima', 'other', 'not_requested', TRUE, FALSE)
 ON CONFLICT (email) DO UPDATE
 SET
   full_name = EXCLUDED.full_name,
