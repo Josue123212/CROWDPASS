@@ -8,6 +8,11 @@ jest.mock("../src/models/event.model", () => ({
 
 jest.mock("../src/models/notification.model", () => ({
   createNotification: jest.fn(),
+  createNotificationsBulkDeduped: jest.fn(),
+}));
+
+jest.mock("../src/models/user.model", () => ({
+  listUserIdsByRoles: jest.fn(),
 }));
 
 jest.mock("../src/models/reservation.model", () => ({
@@ -42,6 +47,7 @@ jest.mock("../src/models/reservation.model", () => ({
   updateRefundStatus: jest.fn(),
   listRefundQueue: jest.fn(),
   isStaffAssignedToEvent: jest.fn(),
+  listStaffUserIdsByEvent: jest.fn(),
   deleteReservation: jest.fn(),
 }));
 
@@ -49,6 +55,7 @@ const db = require("../src/config/db");
 const eventModel = require("../src/models/event.model");
 const notificationModel = require("../src/models/notification.model");
 const reservationModel = require("../src/models/reservation.model");
+const userModel = require("../src/models/user.model");
 const reservationService = require("../src/services/reservation.service");
 
 function buildClient(lockedTicketType = null, lockedEvent = null) {
@@ -117,6 +124,8 @@ describe("reservation.service", () => {
     jest.clearAllMocks();
     reservationModel.findExpiredPendingReservationsForUpdate.mockResolvedValue([]);
     reservationModel.findReservationItemsByReservationId.mockResolvedValue([]);
+    reservationModel.listStaffUserIdsByEvent.mockResolvedValue([22]);
+    userModel.listUserIdsByRoles.mockResolvedValue([]);
   });
 
   it("reutiliza una reserva existente cuando llega el mismo idempotency key", async () => {

@@ -310,6 +310,8 @@ async function createReservation({
       }
     }
 
+    await releaseExpiredPendingReservations({ eventId }, client);
+
     const lockedEventResult = await client.query(
       `SELECT id,
               visibility,

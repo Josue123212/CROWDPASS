@@ -8,7 +8,21 @@ const notFoundMiddleware = require("./middlewares/notFound.middleware");
 const errorMiddleware = require("./middlewares/error.middleware");
 
 const app = express();
-const allowedOrigins = new Set(env.corsOrigins);
+
+function normalizeOrigin(value) {
+  if (!value) {
+    return "";
+  }
+
+  return String(value)
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .trim()
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+const allowedOrigins = new Set(env.corsOrigins.map(normalizeOrigin));
 
 const corsOptions = {
   origin(origin, callback) {
@@ -18,7 +32,9 @@ const corsOptions = {
       return;
     }
 
-    if (allowedOrigins.has(origin)) {
+    const normalized = normalizeOrigin(origin);
+
+    if (allowedOrigins.has(normalized)) {
       callback(null, true);
       return;
     }

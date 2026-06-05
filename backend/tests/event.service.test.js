@@ -20,12 +20,18 @@ jest.mock("../src/models/reservation.model", () => ({
   countCapturedPaymentsForEvent: jest.fn(),
   listAffectedCustomersByEvent: jest.fn(),
   isStaffAssignedToEvent: jest.fn(),
+  listStaffUserIdsByEvent: jest.fn(),
   createEventCancellationRefundRequests: jest.fn(),
   resetRejectedEventCancellationRefundsToPending: jest.fn(),
 }));
 
 jest.mock("../src/models/notification.model", () => ({
   createNotificationsBulk: jest.fn(),
+  createNotificationsBulkDeduped: jest.fn(),
+}));
+
+jest.mock("../src/models/user.model", () => ({
+  listUserIdsByRoles: jest.fn(),
 }));
 
 jest.mock("../src/config/db", () => ({
@@ -36,12 +42,15 @@ jest.mock("../src/config/db", () => ({
 const eventModel = require("../src/models/event.model");
 const reservationModel = require("../src/models/reservation.model");
 const notificationModel = require("../src/models/notification.model");
+const userModel = require("../src/models/user.model");
 const db = require("../src/config/db");
 const eventService = require("../src/services/event.service");
 
 describe("event.service", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    reservationModel.listStaffUserIdsByEvent.mockResolvedValue([]);
+    userModel.listUserIdsByRoles.mockResolvedValue([]);
   });
 
   it("devuelve eventos publicos paginados con metadatos consistentes", async () => {
