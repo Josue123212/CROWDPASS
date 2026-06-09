@@ -22,11 +22,26 @@ function normalizeOrigin(value) {
     .toLowerCase();
 }
 
+function getHostnameFromOrigin(origin) {
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 const allowedOrigins = new Set(env.corsOrigins.map(normalizeOrigin));
-const vercelPreviewPrefixes = env.corsOrigins
-  .map(normalizeOrigin)
-  .filter((origin) => origin.endsWith(".vercel.app"))
-  .map((origin) => origin.replace(/\.vercel\.app$/, ""));
+const vercelProjectPrefixes = Array.from(
+  new Set(
+    env.corsOrigins
+      .map(normalizeOrigin)
+      .map(getHostnameFromOrigin)
+      .filter((hostname) => hostname.endsWith(".vercel.app"))
+      .map((hostname) => hostname.split(".")[0])
+      .map((subdomain) => subdomain.split("-")[0])
+      .filter(Boolean)
+  )
+);
 
 const corsOptions = {
   origin(origin, callback) {
@@ -45,7 +60,7 @@ const corsOptions = {
 
     if (
       normalized.endsWith(".vercel.app") &&
-      vercelPreviewPrefixes.some((prefix) => prefix && normalized.startsWith(prefix))
+      vercelProjectPrefixes.some((prefix) => normalized.startsWith(`https://${prefix}-`))
     ) {
       callback(null, true);
       return;
@@ -53,6 +68,9 @@ const corsOptions = {
 
     const error = new Error("Origen no permitido por la configuracion CORS.");
     error.statusCode = 403;
+    error.details = {
+      blockedOrigin: normalized,
+    };
     callback(error);
   },
 };
