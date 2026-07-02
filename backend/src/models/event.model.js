@@ -4,6 +4,7 @@ const EVENT_SELECT = `
   SELECT
     e.id,
     e.organizer_id,
+    e.external_organizer_name,
     e.category_id,
     e.title,
     e.description,
@@ -111,7 +112,11 @@ const EVENT_CHANGE_REQUEST_SELECT = `
 `;
 
 function buildPublicFilters(filters = {}) {
-  const clauses = ["e.status IN ('published', 'active')", "e.visibility = 'public'"];
+  const clauses = [
+    "e.status IN ('published', 'active')",
+    "e.visibility = 'public'",
+    "COALESCE(e.ends_at, e.starts_at, e.event_date) >= CURRENT_TIMESTAMP",
+  ];
   const params = [];
 
   if (filters.category) {
@@ -418,13 +423,13 @@ async function createEvent(eventData) {
          available_tickets,
          price,
          status,
+         external_organizer_name,
          published_at,
          created_at,
          updated_at
        )
        VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-         CASE WHEN $24 IN ('published', 'active') THEN NOW() ELSE NULL END,
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26,
          NOW(),
          NOW()
        )
@@ -454,6 +459,8 @@ async function createEvent(eventData) {
         eventData.availableTickets,
         eventData.basePrice,
         eventData.status,
+        eventData.externalOrganizerName,
+        ["published", "active"].includes(eventData.status) ? new Date() : null,
       ],
       client
     );
@@ -476,6 +483,25 @@ async function updateEvent(id, eventData) {
 
   try {
     await client.query("BEGIN");
+
+    const currentEventRes = await client.query(
+      "SELECT published_at, cancelled_at FROM events WHERE id = $1",
+      [id]
+    );
+    const currentEvent = currentEventRes.rows[0];
+
+    const currentPublishedAt = currentEvent ? currentEvent.published_at : null;
+    const currentCancelledAt = currentEvent ? currentEvent.cancelled_at : null;
+
+    let publishedAt = currentPublishedAt;
+    if (["published", "active"].includes(eventData.status) && !currentPublishedAt) {
+      publishedAt = new Date();
+    }
+
+    let cancelledAt = currentCancelledAt;
+    if (eventData.status === "cancelled" && !currentCancelledAt) {
+      cancelledAt = new Date();
+    }
 
     const result = await db.query(
       `UPDATE events
@@ -503,15 +529,9 @@ async function updateEvent(id, eventData) {
            price = $23,
            status = $24,
            rejection_reason = $25,
-           published_at = CASE
-             WHEN $24 IN ('published', 'active') AND published_at IS NULL THEN NOW()
-             WHEN $24 NOT IN ('published', 'active') THEN published_at
-             ELSE published_at
-           END,
-           cancelled_at = CASE
-             WHEN $24 = 'cancelled' THEN NOW()
-             ELSE cancelled_at
-           END,
+           external_organizer_name = $26,
+           published_at = $27,
+           cancelled_at = $28,
            updated_at = NOW()
        WHERE id = $1
        RETURNING id`,
@@ -541,6 +561,9 @@ async function updateEvent(id, eventData) {
         eventData.basePrice,
         eventData.status,
         eventData.rejectionReason || null,
+        eventData.externalOrganizerName,
+        publishedAt,
+        cancelledAt,
       ],
       client
     );

@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import QRCode from "qrcode";
 import "./App.css";
+import { isValidPhoneNumber } from "react-phone-number-input";
+import ReactPhoneInput from "react-phone-input-2";
+import "react-phone-input-2/lib/style.css";
+const PhoneInput = ReactPhoneInput.default ? ReactPhoneInput.default : ReactPhoneInput;
 import BackofficeLayout from "./backoffice/BackofficeLayout";
 import { BACKOFFICE_ROLE_CONFIGS } from "./backoffice/roleConfigs";
 
@@ -71,6 +75,48 @@ const EVENT_STATUS_OPTIONS = [
   { value: "cancelled", label: "Cancelado" },
 ];
 const ORGANIZER_PROTECTED_EVENT_STATUSES = ["published", "active", "paused"];
+const isEventExpired = (eventItem) => {
+  if (!eventItem) return false;
+  const eventDate = new Date(eventItem.ends_at || eventItem.starts_at || eventItem.event_date);
+  return eventDate < new Date();
+};
+
+/**
+ * Convierte un enlace de Google Drive o YouTube en una URL embebible para iframe.
+ * Drive:   https://drive.google.com/file/d/FILE_ID/view  →  .../preview
+ * YouTube: https://www.youtube.com/watch?v=VIDEO_ID     →  https://www.youtube.com/embed/VIDEO_ID
+ * YouTube: https://youtu.be/VIDEO_ID                    →  https://www.youtube.com/embed/VIDEO_ID
+ * Retorna null si el enlace no es reconocido.
+ */
+function getPromoVideoEmbedUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  const url = rawUrl.trim();
+
+  // Google Drive: /file/d/FILE_ID/view  →  /file/d/FILE_ID/preview
+  const driveMatch = url.match(/drive\.google\.com\/file\/d\/([^/?#]+)/);
+  if (driveMatch) {
+    return `https://drive.google.com/file/d/${driveMatch[1]}/preview`;
+  }
+
+  // YouTube watch: ?v=VIDEO_ID
+  const ytWatch = url.match(/(?:youtube\.com\/watch\?(?:[^#&]*&)*v=)([^#&?]+)/);
+  if (ytWatch) {
+    return `https://www.youtube.com/embed/${ytWatch[1]}`;
+  }
+
+  // YouTube short link: youtu.be/VIDEO_ID
+  const ytShort = url.match(/youtu\.be\/([^#&?]+)/);
+  if (ytShort) {
+    return `https://www.youtube.com/embed/${ytShort[1]}`;
+  }
+
+  // YouTube embed already
+  if (url.includes("youtube.com/embed/") || url.includes("drive.google.com/file/d/") && url.includes("/preview")) {
+    return url;
+  }
+
+  return null;
+}
 const CHANGE_REQUEST_FIELD_DEFINITIONS = [
   { key: "title", label: "Titulo" },
   { key: "category", label: "Categoria" },
@@ -1046,6 +1092,9 @@ function buildEmptyEventForm() {
     meetingPoint: "",
     status: "draft",
     ticketTypes: [buildEmptyTicketType()],
+    organizerType: "registered",
+    organizerId: "",
+    externalOrganizerName: "",
   };
 }
 
@@ -1082,6 +1131,9 @@ function mapEventToForm(eventItem) {
         maxPerUser: String(ticketType.max_per_user ?? 8),
       }))
       : [buildEmptyTicketType()],
+    organizerType: eventItem.organizer_id ? "registered" : eventItem.external_organizer_name ? "external" : "registered",
+    organizerId: eventItem.organizer_id ? String(eventItem.organizer_id) : "",
+    externalOrganizerName: eventItem.external_organizer_name || "",
   };
 }
 
@@ -1090,6 +1142,7 @@ function useManagedEventsData(auth, options = {}) {
   const [events, setEvents] = useState([]);
   const [changeRequests, setChangeRequests] = useState([]);
   const [categories, setCategories] = useState([]);
+  const [organizersList, setOrganizersList] = useState([]);
   const [formData, setFormData] = useState(buildEmptyEventForm());
   const [editingEventId, setEditingEventId] = useState(null);
   const [feedback, setFeedback] = useState({ type: "", message: "" });
@@ -1164,9 +1217,29 @@ function useManagedEventsData(auth, options = {}) {
     [auth.token, errorMessage]
   );
 
+  const loadOrganizers = useCallback(async () => {
+    if (auth.currentUser?.role === "admin" && auth.token) {
+      try {
+        const response = await apiRequest("/users?group=organizers&limit=100", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${auth.token}`,
+          },
+        });
+        setOrganizersList(response.data || []);
+      } catch (err) {
+        console.error("No se pudieron cargar los organizadores", err);
+      }
+    }
+  }, [auth.token, auth.currentUser?.role]);
+
   useEffect(() => {
     loadEventsData();
   }, [loadEventsData]);
+
+  useEffect(() => {
+    loadOrganizers();
+  }, [loadOrganizers]);
 
   useAutoRefresh(() => loadEventsData({ silent: true }), ORGANIZER_REFRESH_INTERVAL, Boolean(auth.token));
 
@@ -1267,16 +1340,28 @@ function useManagedEventsData(auth, options = {}) {
     setFeedback({ type: "", message: "" });
 
     try {
+      const payload = {
+        ...formData,
+        latitude: null,
+        longitude: null,
+      };
+
+      if (auth.currentUser?.role === "admin") {
+        if (formData.organizerType === "external") {
+          payload.organizerId = null;
+          payload.externalOrganizerName = formData.externalOrganizerName || null;
+        } else {
+          payload.organizerId = formData.organizerId ? Number(formData.organizerId) : null;
+          payload.externalOrganizerName = null;
+        }
+      }
+
       const response = await apiRequest(editingEventId ? `/events/${editingEventId}` : "/events", {
         method: editingEventId ? "PATCH" : "POST",
         headers: {
           Authorization: `Bearer ${auth.token}`,
         },
-        body: JSON.stringify({
-          ...formData,
-          latitude: null,
-          longitude: null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       setFeedback({ type: "success", message: response.message });
@@ -1470,6 +1555,7 @@ function useManagedEventsData(auth, options = {}) {
     changeRequestSummary,
     changeRequestAttachments,
     setFeedback,
+    organizersList,
     updateField,
     updateTicketType,
     addTicketType,
@@ -1530,6 +1616,150 @@ function useAdminEventInsights(events) {
   return { adminSalesSummary, revenueChartData, topRevenueValue };
 }
 
+const BACKEND_ORIGIN = (import.meta.env.VITE_API_BASE_URL || "http://localhost:3000/api").replace(/\/api$/, "");
+
+function ImageUploadField({ value, onChange, auth }) {
+  const [tab, setTab] = useState("url");
+  const [urlInput, setUrlInput] = useState(value || "");
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const [imgError, setImgError] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // Reset image error whenever the URL changes
+  useEffect(() => {
+    setImgError(false);
+  }, [value]);
+
+  // Sync url tab with external value
+  useEffect(() => {
+    if (tab === "url") {
+      setUrlInput(value || "");
+    }
+  }, [value, tab]);
+
+  const handleUrlChange = (e) => {
+    setUrlInput(e.target.value);
+    onChange(e.target.value);
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError("");
+    setUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+
+      const token = auth?.token || auth?.currentUser?.token || localStorage.getItem("crowdpass_token");
+      const response = await fetch(`${BACKEND_ORIGIN}/api/uploads/image`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json?.message || "Error al subir la imagen.");
+      }
+
+      onChange(json.data?.url || "");
+    } catch (err) {
+      setUploadError(err.message || "No se pudo subir la imagen. Intenta de nuevo.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const previewUrl = value || "";
+
+  return (
+    <div className="image-upload-field">
+      <p className="image-upload-label">Imagen destacada</p>
+      <div className="image-upload-tabs">
+        <button
+          type="button"
+          className={`image-upload-tab${tab === "url" ? " active" : ""}`}
+          onClick={() => setTab("url")}
+        >
+          🔗 Pegar enlace
+        </button>
+        <button
+          type="button"
+          className={`image-upload-tab${tab === "file" ? " active" : ""}`}
+          onClick={() => setTab("file")}
+        >
+          📁 Subir archivo
+        </button>
+      </div>
+
+      {tab === "url" && (
+        <div className="image-upload-panel">
+          <input
+            type="url"
+            placeholder="https://ejemplo.com/imagen.jpg"
+            value={urlInput}
+            onChange={handleUrlChange}
+            className="image-upload-url-input"
+          />
+        </div>
+      )}
+
+      {tab === "file" && (
+        <div className="image-upload-panel">
+          <label className={`image-upload-dropzone${uploading ? " uploading" : ""}`}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              onChange={handleFileChange}
+              disabled={uploading}
+              style={{ display: "none" }}
+            />
+            {uploading ? (
+              <>
+                <span className="image-upload-icon">⏳</span>
+                <span>Subiendo imagen...</span>
+              </>
+            ) : (
+              <>
+                <span className="image-upload-icon">⬆️</span>
+                <span>Haz clic o arrastra una imagen</span>
+                <small>JPEG, PNG, WebP o GIF · máx. 5 MB</small>
+              </>
+            )}
+          </label>
+          {uploadError && <p className="image-upload-error">{uploadError}</p>}
+        </div>
+      )}
+
+      {previewUrl && (
+        <div className="image-upload-preview">
+          {imgError ? (
+            <div className="image-upload-broken">
+              <span>⚠️</span>
+              <p>No se puede previsualizar esta URL. Asegúrate de pegar un enlace directo a una imagen (termina en .jpg, .png, .webp, etc.).</p>
+            </div>
+          ) : (
+            <img
+              src={previewUrl}
+              alt="Vista previa de imagen destacada"
+              onError={() => setImgError(true)}
+              onLoad={() => setImgError(false)}
+            />
+          )}
+          <button type="button" className="image-upload-clear" onClick={() => { onChange(""); setUrlInput(""); setImgError(false); }}>
+            ✕ Quitar imagen
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EventEditorModal({
   categories,
   formData,
@@ -1542,7 +1772,21 @@ function EventEditorModal({
   onUpdateTicketType,
   onAddTicketType,
   onRemoveTicketType,
+  auth = null,
+  organizersList = [],
+  requiresMinDate = false,
 }) {
+  const getMinEventDate = () => {
+    const minDate = new Date();
+    minDate.setDate(minDate.getDate() + 30);
+    const year = minDate.getFullYear();
+    const month = String(minDate.getMonth() + 1).padStart(2, "0");
+    const day = String(minDate.getDate()).padStart(2, "0");
+    const hours = String(minDate.getHours()).padStart(2, "0");
+    const minutes = String(minDate.getMinutes()).padStart(2, "0");
+    return `${year}-${month}-${day}T${hours}:${minutes}`;
+  };
+
   if (!isOpen) {
     return null;
   }
@@ -1571,6 +1815,56 @@ function EventEditorModal({
           </div>
 
           <form className="form-grid compact-grid organizer-form" onSubmit={onSubmit}>
+            {auth?.currentUser?.role === "admin" && (
+              <div className="form-span-2 form-grid compact-grid" style={{ gridColumn: "span 2", display: "grid", gap: "1rem", gridTemplateColumns: "1fr 1fr", paddingBottom: "0.5rem" }}>
+                <label>
+                  Tipo de Organizador
+                  <select
+                    value={formData.organizerType || "registered"}
+                    onChange={(event) => {
+                      onUpdateField("organizerType", event.target.value);
+                      if (event.target.value === "external") {
+                        onUpdateField("organizerId", "");
+                      } else {
+                        onUpdateField("externalOrganizerName", "");
+                      }
+                    }}
+                  >
+                    <option value="registered">Registrado en la plataforma</option>
+                    <option value="external">Externo (No registrado)</option>
+                  </select>
+                </label>
+
+                {formData.organizerType === "external" ? (
+                  <label>
+                    Nombre del Organizador Externo
+                    <input
+                      value={formData.externalOrganizerName || ""}
+                      onChange={(event) => onUpdateField("externalOrganizerName", event.target.value)}
+                      placeholder="Ej. Productora XYZ"
+                      required
+                    />
+                  </label>
+                ) : (
+                  <label>
+                    Selecciona Organizador
+                    <select
+                      value={formData.organizerId || ""}
+                      onChange={(event) => onUpdateField("organizerId", event.target.value)}
+                      required
+                    >
+                      <option value="">-- Elige un organizador --</option>
+                      {organizersList.map((org) => (
+                        <option key={org.id} value={org.id}>
+                          {org.full_name} ({org.email})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
+
             <label>
               Titulo
               <input value={formData.title} onChange={(event) => onUpdateField("title", event.target.value)} required />
@@ -1594,13 +1888,21 @@ function EventEditorModal({
               Informacion adicional
               <textarea value={formData.additionalInfo} onChange={(event) => onUpdateField("additionalInfo", event.target.value)} rows="3" />
             </label>
-            <label>
-              Imagen destacada
-              <input value={formData.featuredImageUrl} onChange={(event) => onUpdateField("featuredImageUrl", event.target.value)} />
-            </label>
+            <div className="form-span-2 image-uploader-field">
+              <ImageUploadField
+                value={formData.featuredImageUrl}
+                onChange={(url) => onUpdateField("featuredImageUrl", url)}
+                auth={auth}
+              />
+            </div>
             <label>
               Video promocional
-              <input value={formData.promoVideoUrl} onChange={(event) => onUpdateField("promoVideoUrl", event.target.value)} />
+              <input
+                value={formData.promoVideoUrl}
+                onChange={(event) => onUpdateField("promoVideoUrl", event.target.value)}
+                placeholder="https://drive.google.com/file/d/... o https://youtube.com/watch?v=..."
+              />
+              <span className="field-assist-message">Pega un enlace de Google Drive (público) o YouTube. Se mostrará como reproductor en la ficha del evento.</span>
             </label>
             <label>
               Venue
@@ -1620,11 +1922,28 @@ function EventEditorModal({
             </label>
             <label>
               Inicio
-              <input type="datetime-local" value={formData.startsAt} onChange={(event) => onUpdateField("startsAt", event.target.value)} required />
+              <input 
+                type="datetime-local" 
+                value={formData.startsAt} 
+                min={requiresMinDate ? getMinEventDate() : undefined} 
+                onChange={(event) => onUpdateField("startsAt", event.target.value)} 
+                required 
+              />
+              {requiresMinDate && (
+                <span className="field-assist-message">
+                  La fecha del evento debe programarse con un mínimo de 1 mes de anticipación.
+                </span>
+              )}
             </label>
             <label>
               Fin
-              <input type="datetime-local" value={formData.endsAt} onChange={(event) => onUpdateField("endsAt", event.target.value)} required />
+              <input 
+                type="datetime-local" 
+                value={formData.endsAt} 
+                min={requiresMinDate ? getMinEventDate() : undefined} 
+                onChange={(event) => onUpdateField("endsAt", event.target.value)} 
+                required 
+              />
             </label>
             <label>
               Visibilidad
@@ -1982,7 +2301,12 @@ function AdminEventCatalogGrid({ events, deletingId, disablingId, onEdit, onDisa
                 <strong>{eventItem.title}</strong>
                 <span>{eventItem.category_name || "Evento"} · {eventItem.city || "Peru"}</span>
               </div>
-              <span className={`status-pill ${isSoldOut ? "cancelled" : eventItem.status}`}>{isSoldOut ? "Agotado" : getEventStatusLabel(eventItem.status)}</span>
+              <div style={{ display: "flex", gap: "6px" }}>
+                <span className={`status-pill ${isSoldOut ? "cancelled" : eventItem.status}`}>{isSoldOut ? "Agotado" : getEventStatusLabel(eventItem.status)}</span>
+                {isEventExpired(eventItem) && (
+                  <span className="status-pill cancelled">Vencido</span>
+                )}
+              </div>
             </div>
             <div className="admin-event-card-metrics">
               <div>
@@ -3611,6 +3935,46 @@ function RegisterPage({ auth }) {
     }
   };
 
+  const handlePhoneChange = (value, country) => {
+    if (!value) {
+      setFormData((prev) => ({
+        ...prev,
+        phone: "",
+      }));
+      availabilityRequestSequence.current.phone += 1;
+      setAvailabilityFeedback((prev) => ({
+        ...prev,
+        phone: { tone: "", message: "" },
+      }));
+      return;
+    }
+
+    // Calcular el límite dinámico de dígitos del país seleccionado
+    // dialCode.length + número de puntos (.) en el formato
+    let maxDigits = 15; // fallback
+    if (country && country.format) {
+      const dotsCount = (country.format.match(/\./g) || []).length;
+      const dialCodeLength = country.dialCode ? country.dialCode.length : 0;
+      maxDigits = dialCodeLength + dotsCount;
+    }
+
+    // Si los dígitos ingresados superan el límite del país, ignoramos
+    if (value.length > maxDigits) {
+      return;
+    }
+
+    setFormData((prev) => ({
+      ...prev,
+      phone: "+" + value,
+    }));
+
+    availabilityRequestSequence.current.phone += 1;
+    setAvailabilityFeedback((prev) => ({
+      ...prev,
+      phone: { tone: "", message: "" },
+    }));
+  };
+
   const handleAvailabilityBlur = async (fieldName) => {
     const rawValue = formData[fieldName];
     const value = String(rawValue || "").trim();
@@ -3639,10 +4003,10 @@ function RegisterPage({ auth }) {
       return;
     }
 
-    if (fieldName === "phone" && !REGISTER_PHONE_REGEX.test(value)) {
+    if (fieldName === "phone" && !isValidPhoneNumber(value)) {
       setAvailabilityFeedback((prev) => ({
         ...prev,
-        phone: { tone: "error", message: "El telefono debe incluir prefijo internacional, por ejemplo +51999999999." },
+        phone: { tone: "error", message: "El número de teléfono no es válido para el país seleccionado." },
       }));
       return;
     }
@@ -3708,6 +4072,11 @@ function RegisterPage({ auth }) {
 
     if (!formData.acceptsTerms) {
       setFeedback({ type: "error", message: "Debes aceptar los terminos y condiciones." });
+      return;
+    }
+
+    if (!formData.phone || !isValidPhoneNumber(formData.phone)) {
+      setFeedback({ type: "error", message: "El número de teléfono no es válido para el país seleccionado." });
       return;
     }
 
@@ -3878,7 +4247,18 @@ function RegisterPage({ auth }) {
         </label>
         <label>
           Telefono con prefijo
-          <input name="phone" value={formData.phone} onChange={handleChange} onBlur={() => handleAvailabilityBlur("phone")} required />
+          <PhoneInput
+            country="pe"
+            value={formData.phone}
+            onChange={handlePhoneChange}
+            onBlur={() => handleAvailabilityBlur("phone")}
+            inputProps={{
+              name: "phone",
+              required: true,
+            }}
+            placeholder="912 345 678"
+            specialLabel=""
+          />
           {availabilityFeedback.phone.message ? (
             <span className={`field-assist-message ${availabilityFeedback.phone.tone}`}>{availabilityFeedback.phone.message}</span>
           ) : null}
@@ -4438,6 +4818,25 @@ function EventDetailPage({ auth }) {
                 <p className="muted">{event.description}</p>
                 {event.additional_info ? <p className="muted">{event.additional_info}</p> : null}
               </section>
+
+              {/* Video promocional */}
+              {getPromoVideoEmbedUrl(event.promo_video_url) && (
+                <section className="panel-card detail-section promo-video-section">
+                  <div className="panel-card-header">
+                    <h3>Video promocional</h3>
+                  </div>
+                  <div className="promo-video-wrapper">
+                    <iframe
+                      src={getPromoVideoEmbedUrl(event.promo_video_url)}
+                      title={`Video promocional de ${event.title}`}
+                      allow="autoplay; encrypted-media; fullscreen"
+                      allowFullScreen
+                      frameBorder="0"
+                      loading="lazy"
+                    />
+                  </div>
+                </section>
+              )}
 
               <section className="panel-card detail-section">
                 <div className="panel-card-header">
@@ -7890,6 +8289,7 @@ function OrganizerEventsPage({ auth }) {
     openCreateModal,
     closeEventModal,
     closeChangeRequestModal,
+    organizersList,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar tus eventos en este momento." });
   const location = useLocation();
   const navigate = useNavigate();
@@ -7969,9 +8369,16 @@ function OrganizerEventsPage({ auth }) {
         .toLowerCase();
       const matchesSearch = normalizedSearchTerm ? searchableText.includes(normalizedSearchTerm) : true;
 
+      const isExpired = isEventExpired(eventItem);
+      if (activeView === "history") {
+        return matchesStatus && matchesSearch && isExpired;
+      } else if (activeView === "events") {
+        return matchesStatus && matchesSearch && !isExpired;
+      }
+
       return matchesStatus && matchesSearch;
     });
-  }, [events, normalizedSearchTerm, statusFilter]);
+  }, [events, normalizedSearchTerm, statusFilter, activeView]);
 
   const sortedByRevenue = useMemo(() => {
     return [...filteredEvents].sort((left, right) => Number(right.revenue_total || 0) - Number(left.revenue_total || 0));
@@ -8024,6 +8431,11 @@ function OrganizerEventsPage({ auth }) {
       eyebrow: "Gestion de eventos",
       title: "Administra tu listado principal",
       subtitle: "Filtra, revisa disponibilidad y entra directo a editar sin cambiar de pantalla.",
+    },
+    history: {
+      eyebrow: "Historial de eventos",
+      title: "Revisa tus eventos pasados",
+      subtitle: "Consulta métricas de tus eventos finalizados o vuelve a programarlos para una nueva fecha.",
     },
     ranking: {
       eyebrow: "Ranking de recaudacion",
@@ -8121,9 +8533,15 @@ function OrganizerEventsPage({ auth }) {
                   <td>{formatCurrency(eventItem.organizer_revenue || 0)}</td>
                   <td>
                     <div className="cta-row compact-actions organizer-row-actions">
-                      <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
-                        {requiresModeratedChange ? "Solicitar cambios" : "Editar"}
-                      </button>
+                      {isEventExpired(eventItem) ? (
+                        <button className="secondary-button highlight-action" type="button" onClick={() => editEvent(eventItem)}>
+                          Volver a programar
+                        </button>
+                      ) : (
+                        <button className="secondary-button" type="button" onClick={() => editEvent(eventItem)}>
+                          {requiresModeratedChange ? "Solicitar cambios" : "Editar"}
+                        </button>
+                      )}
                       {["published", "active"].includes(eventItem.status) ? (
                         <button
                           className="ghost-button"
@@ -8295,6 +8713,64 @@ function OrganizerEventsPage({ auth }) {
         )}
       </section>
     </>
+  );
+
+  const renderRequestsView = () => (
+    <section className="panel-card">
+      <div className="panel-card-header">
+        <div>
+          <h3>Historial de Solicitudes de Cambio</h3>
+          <p className="muted">Consulta el estado de tus solicitudes de edición o cancelación enviadas para moderación del administrador.</p>
+        </div>
+      </div>
+      {!changeRequests.length ? (
+        <div className="empty-state compact-state">
+          <h3>Aún no tienes solicitudes</h3>
+          <p className="muted">Cuando envíes solicitudes de edición o cancelación para tus eventos activos, aparecerán aquí con su respectivo seguimiento.</p>
+        </div>
+      ) : (
+        <div className="table-wrapper">
+          <table className="data-table organizer-data-table">
+            <thead>
+              <tr>
+                <th>Evento</th>
+                <th>Tipo de Solicitud</th>
+                <th>Estado de Aprobación</th>
+                <th>Explicación / Motivo</th>
+                <th>Respuesta del Administrador</th>
+                <th>Última Actualización</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changeRequests.map((request) => (
+                <tr key={`req-row-${request.id}`}>
+                  <td><strong>{request.event_title}</strong></td>
+                  <td>
+                    <span>
+                      {getChangeRequestTypeLabel(request.request_type)}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`status-pill ${request.status}`}>
+                      {getChangeRequestStatusLabel(request.status)}
+                    </span>
+                  </td>
+                  <td>{request.explanation || <span className="muted">Sin explicación</span>}</td>
+                  <td>
+                    {request.admin_response ? (
+                      <span style={{ fontWeight: 600, color: "var(--cp-primary)" }}>{request.admin_response}</span>
+                    ) : (
+                      <span className="muted">Sin comentarios aún</span>
+                    )}
+                  </td>
+                  <td>{formatDate(request.updated_at || request.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 
   const renderEventsView = () => (
@@ -8486,6 +8962,14 @@ function OrganizerEventsPage({ auth }) {
       return renderEventsView();
     }
 
+    if (activeView === "history") {
+      return renderEventsView();
+    }
+
+    if (activeView === "requests") {
+      return renderRequestsView();
+    }
+
     if (activeView === "ranking") {
       return renderRankingView();
     }
@@ -8529,6 +9013,9 @@ function OrganizerEventsPage({ auth }) {
               <option value="paused">Pausado</option>
               <option value="rejected">Rechazado</option>
             </select>
+            <button className="primary-button" type="button" onClick={openCreateModal}>
+              + Nuevo evento
+            </button>
             <div className="organizer-console-profile">
               <img src={ADMIN_AVATAR_IMAGE} alt="Perfil organizador" />
               <div>
@@ -8562,6 +9049,9 @@ function OrganizerEventsPage({ auth }) {
         onUpdateTicketType={updateTicketType}
         onAddTicketType={addTicketType}
         onRemoveTicketType={removeTicketType}
+        auth={auth}
+        organizersList={organizersList}
+        requiresMinDate={!editingEventId || isEventExpired(events.find(item => item.id === editingEventId))}
       />
       <EventChangeRequestModal
         attachments={changeRequestAttachments}
@@ -8606,6 +9096,7 @@ function AdminEventsPage({ auth }) {
     disableEvent,
     openCreateModal,
     closeEventModal,
+    organizersList,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar los eventos de administracion en este momento." });
   const { adminSalesSummary, revenueChartData, topRevenueValue } = useAdminEventInsights(events);
   const recentEvents = useMemo(() => events.slice(0, 6), [events]);
@@ -8692,6 +9183,9 @@ function AdminEventsPage({ auth }) {
                 </p>
                 <span>
                   {getEventStatusLabel(eventItem.status)} · {formatDate(eventItem.starts_at || eventItem.event_date)}
+                  {isEventExpired(eventItem) && (
+                    <span className="status-pill cancelled" style={{ marginLeft: "8px" }}>Vencido</span>
+                  )}
                 </span>
                 <div className="admin-event-inline-metrics">
                   <span>{Number(eventItem.tickets_sold || 0)} entradas vendidas</span>
@@ -8732,6 +9226,9 @@ function AdminEventsPage({ auth }) {
         onUpdateTicketType={updateTicketType}
         onAddTicketType={addTicketType}
         onRemoveTicketType={removeTicketType}
+        auth={auth}
+        organizersList={organizersList}
+        requiresMinDate={!editingEventId || isEventExpired(events.find(item => item.id === editingEventId))}
       />
     </section>
   );
@@ -8762,6 +9259,7 @@ function AdminEventCatalogPage({ auth }) {
     disableEvent,
     openCreateModal,
     closeEventModal,
+    organizersList,
   } = useManagedEventsData(auth, { errorMessage: "No pudimos cargar el catalogo administrativo en este momento." });
 
   return (
@@ -8815,6 +9313,9 @@ function AdminEventCatalogPage({ auth }) {
         onUpdateTicketType={updateTicketType}
         onAddTicketType={addTicketType}
         onRemoveTicketType={removeTicketType}
+        auth={auth}
+        organizersList={organizersList}
+        requiresMinDate={!editingEventId || isEventExpired(events.find(item => item.id === editingEventId))}
       />
     </section>
   );

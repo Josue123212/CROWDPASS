@@ -6,6 +6,7 @@ const reservationRoutes = require("./reservation.routes");
 const notificationRoutes = require("./notification.routes");
 const walletRoutes = require("./wallet.routes");
 const paymentRoutes = require("./payment.routes");
+const uploadRoutes = require("./upload.routes");
 const db = require("../config/db");
 const { failure, success } = require("../utils/response");
 const asyncHandler = require("../utils/asyncHandler");
@@ -52,5 +53,6 @@ router.use("/reservations", reservationRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/wallet", walletRoutes);
 router.use("/payments", paymentRoutes);
+router.use("/uploads", uploadRoutes);
 
 module.exports = router;

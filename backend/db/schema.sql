@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS events (
   price NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
   status VARCHAR(20) NOT NULL DEFAULT 'active'
     CHECK (status IN ('draft', 'pending_review', 'published', 'paused', 'finished', 'cancelled', 'rejected', 'active')),
+  external_organizer_name VARCHAR(150) NULL,
   rejection_reason TEXT,
   published_at TIMESTAMP,
   cancelled_at TIMESTAMP,

@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
+const path = require("path");
+const fs = require("fs");
 const env = require("./config/env");
 const routes = require("./routes");
 const { globalRateLimit } = require("./middlewares/rateLimit.middleware");
@@ -9,6 +11,12 @@ const errorMiddleware = require("./middlewares/error.middleware");
 
 const app = express();
 
+// Asegurar que el directorio de uploads exista
+const UPLOADS_DIR = path.join(__dirname, "../../uploads");
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
 function normalizeOrigin(value) {
   if (!value) {
     return "";
@@ -16,7 +24,7 @@ function normalizeOrigin(value) {
 
   return String(value)
     .trim()
-    .replace(/^['"`]+|['"`]+$/g, "")
+    .replace(/^['\"`]+|['\"`]+$/g, "")
     .trim()
     .replace(/\/+$/, "")
     .toLowerCase();
@@ -75,13 +83,17 @@ const corsOptions = {
   },
 };
 
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(cors(corsOptions));
 app.use(express.json());
 app.use(globalRateLimit);
+
+// Servir imágenes subidas como archivos estáticos
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 app.use("/api", routes);
 app.use(notFoundMiddleware);
 app.use(errorMiddleware);
 
 module.exports = app;
+

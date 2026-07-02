@@ -126,6 +126,7 @@ function normalizeEventForComparison(event) {
     addressReference: event.addressReference || event.address_reference || "",
     meetingPoint: event.meetingPoint || event.meeting_point || "",
     status: event.status || "draft",
+    externalOrganizerName: event.externalOrganizerName || event.external_organizer_name || "",
     ticketTypes: normalizeTicketTypesForComparison(event.ticketTypes || event.ticket_types || []),
   };
 }
@@ -227,6 +228,7 @@ async function buildPersistableEventData(eventData) {
     basePrice,
     status: eventData.status,
     rejectionReason: eventData.rejectionReason || null,
+    externalOrganizerName: eventData.externalOrganizerName || null,
     ticketTypes: eventData.ticketTypes,
   };
 }
@@ -263,10 +265,17 @@ async function getEventById(id) {
 }
 
 async function createEvent(eventData, user) {
+  const minDate = new Date();
+  minDate.setDate(minDate.getDate() + 30);
+  if (new Date(eventData.startsAt) < minDate) {
+    throw new ApiError(400, "La fecha de inicio del evento debe programarse con un mínimo de 1 mes de anticipación (30 días).");
+  }
+
   const persistedEventData = await buildPersistableEventData(eventData);
 
   const createdEvent = await eventModel.createEvent({
     organizerId: user.role === "admin" ? eventData.organizerId || null : user.sub,
+    externalOrganizerName: user.role === "admin" && !eventData.organizerId ? eventData.externalOrganizerName || null : null,
     ...persistedEventData,
   });
 
@@ -290,6 +299,16 @@ async function updateEvent(id, eventData, user) {
 
   if (!existingEvent) {
     throw new ApiError(404, "Evento no encontrado.");
+  }
+
+  const existingDate = new Date(existingEvent.starts_at || existingEvent.event_date);
+  const isExpired = existingDate < new Date();
+  if (isExpired) {
+    const minDate = new Date();
+    minDate.setDate(minDate.getDate() + 30);
+    if (new Date(eventData.startsAt) < minDate) {
+      throw new ApiError(400, "La fecha de inicio del evento reprogramado debe ser con un mínimo de 1 mes de anticipación (30 días).");
+    }
   }
 
   if (user.role !== "admin" && Number(existingEvent.organizer_id) !== Number(user.sub)) {
@@ -432,6 +451,16 @@ async function submitChangeRequest(eventId, { requestType, explanation, attachme
 
   try {
     if (requestType === "update") {
+      const existingDate = new Date(existingEvent.starts_at || existingEvent.event_date);
+      const isExpired = existingDate < new Date();
+      if (isExpired) {
+        const minDate = new Date();
+        minDate.setDate(minDate.getDate() + 30);
+        if (proposedEventData && new Date(proposedEventData.startsAt) < minDate) {
+          throw new ApiError(400, "La fecha de inicio del evento reprogramado debe ser con un mínimo de 1 mes de anticipación (30 días).");
+        }
+      }
+
       if (proposedEventData?.status === "cancelled") {
         throw new ApiError(400, "La cancelacion de un evento publicado debe enviarse como solicitud de cancelacion.");
       }
@@ -594,8 +623,16 @@ async function reviewChangeRequest(requestId, { decision, adminResponse }, user)
 
   if (decision === "approve") {
     if (changeRequest.request_type === "update") {
+      const existingEvent = await eventModel.findEventById(changeRequest.event_id);
+      if (!existingEvent) {
+        throw new ApiError(404, "Evento no encontrado.");
+      }
+
       const proposedPayload = changeRequest.proposed_payload || {};
-      const persistedEventData = await buildPersistableEventData(proposedPayload);
+      const persistedEventData = await buildPersistableEventData({
+        ...proposedPayload,
+        status: existingEvent.status,
+      });
       const updatedEvent = await eventModel.updateEvent(changeRequest.event_id, persistedEventData);
 
       if (!updatedEvent) {

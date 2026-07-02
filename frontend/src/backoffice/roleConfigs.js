@@ -79,6 +79,7 @@ export const BACKOFFICE_ROLE_CONFIGS = {
     sidebarItems: [
       { label: "Dashboard", path: "/organizer/events?view=dashboard", isActive: isOrganizerViewActive("dashboard"), icon: "dashboard" },
       { label: "Eventos", path: "/organizer/events?view=events", isActive: isOrganizerViewActive("events"), icon: "calendar_month" },
+      { label: "Historial", path: "/organizer/events?view=history", isActive: isOrganizerViewActive("history"), icon: "history" },
       { label: "Solicitudes", path: "/organizer/events?view=requests", isActive: isOrganizerViewActive("requests"), icon: "wysiwyg" },
       { label: "Perfil", path: "/organizer/events?view=profile", isActive: isOrganizerViewActive("profile"), icon: "account_circle" },
     ],
