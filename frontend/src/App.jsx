@@ -4221,13 +4221,38 @@ function RegisterPage({ auth }) {
           <input name="city" value={formData.city} onChange={handleChange} required />
         </label>
         <label>
-          Documento / DNI
+          Tipo de Documento
+          <select 
+            name="documentType" 
+            value={formData.documentType || "dni"} 
+            onChange={(e) => {
+              handleChange(e);
+              setFormData(prev => ({ ...prev, documentNumber: "" }));
+            }}
+          >
+            <option value="dni">DNI (Perú)</option>
+            <option value="other">Carnet de Extranjería / Pasaporte</option>
+          </select>
+        </label>
+        <label>
+          Número de Documento
           <input
             name="documentNumber"
             value={formData.documentNumber}
-            onChange={handleChange}
+            onChange={(e) => {
+              const activeType = formData.documentType || "dni";
+              let rawVal = e.target.value;
+              if (activeType === "dni") {
+                rawVal = rawVal.replace(/\D/g, "").slice(0, 8);
+              } else {
+                rawVal = rawVal.replace(/[^a-zA-Z0-9]/g, "").slice(0, 12);
+              }
+              e.target.value = rawVal;
+              handleChange(e);
+            }}
             onBlur={() => handleAvailabilityBlur("documentNumber")}
             required
+            placeholder={formData.documentType === "other" ? "Ej: 1234567890AB" : "8 dígitos numéricos"}
           />
           {availabilityFeedback.documentNumber.message ? (
             <span className={`field-assist-message ${availabilityFeedback.documentNumber.tone}`}>
