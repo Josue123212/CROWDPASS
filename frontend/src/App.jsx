@@ -6146,6 +6146,7 @@ function CustomerTicketsPage({ auth }) {
   const [issuedTickets, setIssuedTickets] = useState([]);
   const [isLoadingIssuedTickets, setIsLoadingIssuedTickets] = useState(false);
   const [issuedTicketsQrMap, setIssuedTicketsQrMap] = useState({});
+  const [refundConfirmTarget, setRefundConfirmTarget] = useState(null);
 
   const loadReservations = useCallback(
     async ({ silent = false } = {}) => {
@@ -6391,25 +6392,13 @@ function CustomerTicketsPage({ auth }) {
     }
   };
 
-  const requestRefund = async (reservation) => {
-    const reservationId = reservation?.id;
-    if (!reservationId) {
-      return;
-    }
+  const requestRefund = (reservation) => {
+    setRefundConfirmTarget(reservation);
+  };
 
-    const paymentSnapshot = reservation?.card_snapshot_masked || formatPaymentMethodLabel(reservation?.payment_method);
-    const confirmation = window.confirm(
-      `Solicitud de reembolso por seguro\n\n` +
-        `El monto de ${formatCurrency(reservation?.total_amount)} sera devuelto a su metodo de pago de origen: ${paymentSnapshot}\n\n` +
-        `Evento: ${reservation?.event_title || `Evento #${reservation?.event_id || ""}`}\n` +
-        `Fecha del evento: ${formatDate(reservation?.event_starts_at)}\n\n` +
-        `Deseas continuar?`
-    );
-
-    if (!confirmation) {
-      return;
-    }
-
+  const executeRefundRequest = async (reservationId) => {
+    if (!reservationId) return;
+    setRefundConfirmTarget(null);
     setRequestingRefundId(reservationId);
     setFeedback({ type: "", message: "" });
 
@@ -6423,7 +6412,7 @@ function CustomerTicketsPage({ auth }) {
 
       setFeedback({
         type: "success",
-        message: "Solicitud de reembolso enviada. Te notificaremos cuando se procese.",
+        message: "Solicitud de reembolso enviada de manera exitosa.",
       });
       await loadReservations({ silent: true });
     } catch (error) {
@@ -6841,6 +6830,121 @@ function CustomerTicketsPage({ auth }) {
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Modal Premium de Confirmación de Reembolso */}
+      {refundConfirmTarget ? (
+        <div 
+          className="modal-backdrop"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(15, 23, 42, 0.65)",
+            backdropFilter: "blur(6px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+            padding: "20px"
+          }}
+        >
+          <div 
+            className="modal-card"
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "16px",
+              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)",
+              maxWidth: "460px",
+              width: "100%",
+              padding: "24px",
+              border: "1px solid #f1f5f9"
+            }}
+          >
+            <div style={{ display: "flex", gap: "16px", marginBottom: "20px" }}>
+              <div 
+                style={{
+                  width: "48px",
+                  height: "48px",
+                  borderRadius: "50%",
+                  backgroundColor: "#fee2e2",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "#ef4444",
+                  fontSize: "24px",
+                  flexShrink: 0
+                }}
+              >
+                🛡️
+              </div>
+              <div>
+                <h3 style={{ fontSize: "18px", fontWeight: "700", color: "#1e1b4b", margin: "0 0 6px 0" }}>
+                  Confirmar solicitud de reembolso
+                </h3>
+                <p className="muted" style={{ fontSize: "14px", margin: 0 }}>
+                  Tu compra califica para reembolso garantizado bajo la cobertura del seguro adquirido.
+                </p>
+              </div>
+            </div>
+
+            <div 
+              style={{
+                backgroundColor: "#f8fafc",
+                borderRadius: "12px",
+                padding: "16px",
+                fontSize: "14px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+                marginBottom: "24px",
+                border: "1px solid #f1f5f9"
+              }}
+            >
+              <div>
+                <span className="muted" style={{ display: "block", fontSize: "11px", textTransform: "uppercase", fontWeight: "bold" }}>Evento</span>
+                <strong style={{ color: "#0f172a" }}>{refundConfirmTarget.event_title}</strong>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <div>
+                  <span className="muted" style={{ display: "block", fontSize: "11px", textTransform: "uppercase", fontWeight: "bold" }}>Fecha del evento</span>
+                  <strong style={{ color: "#0f172a" }}>{formatDate(refundConfirmTarget.event_starts_at)}</strong>
+                </div>
+                <div>
+                  <span className="muted" style={{ display: "block", fontSize: "11px", textTransform: "uppercase", fontWeight: "bold" }}>Monto de Devolución</span>
+                  <strong style={{ color: "#4d44e3" }}>{formatCurrency(refundConfirmTarget.total_amount)}</strong>
+                </div>
+              </div>
+              <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: "8px", marginTop: "4px" }}>
+                <span className="muted" style={{ display: "block", fontSize: "11px", textTransform: "uppercase", fontWeight: "bold" }}>Destino del reembolso</span>
+                <strong style={{ color: "#0f172a", fontSize: "13px" }}>
+                  {refundConfirmTarget.card_snapshot_masked || formatPaymentMethodLabel(refundConfirmTarget.payment_method)}
+                </strong>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "12px", justifyContent: "flex-end" }}>
+              <button 
+                className="ghost-button" 
+                type="button" 
+                onClick={() => setRefundConfirmTarget(null)}
+                style={{ padding: "10px 20px" }}
+              >
+                Volver
+              </button>
+              <button 
+                className="primary-button" 
+                type="button" 
+                onClick={() => executeRefundRequest(refundConfirmTarget.id)}
+                style={{ padding: "10px 20px", backgroundColor: "#ef4444" }}
+              >
+                Confirmar reembolso
+              </button>
             </div>
           </div>
         </div>
