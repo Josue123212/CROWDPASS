@@ -4,6 +4,7 @@ import { Counter, Trend } from "k6/metrics";
 
 // Métricas personalizadas en consola en tiempo real
 const createdReservations = new Counter("created_reservations");
+const purchaseAttempts = new Counter("purchase_attempts");
 const soldOutHits = new Counter("sold_out_hits");
 const rateLimitHits = new Counter("rate_limit_hits");
 const serverErrors = new Counter("server_errors");
@@ -132,6 +133,7 @@ export default function () {
       },
       timeout: requestTimeout,
     });
+    purchaseAttempts.add(1);
 
     if (response.status === 201) {
       createdReservations.add(1);
@@ -187,6 +189,7 @@ export function handleSummary(data) {
   
   const totalUsers = stats.registration_success ? stats.registration_success.values.count : 0;
   const reservationsCreated = stats.created_reservations ? stats.created_reservations.values.count : 0;
+  const totalAttempts = stats.purchase_attempts ? stats.purchase_attempts.values.count : 0;
   const soldOut = stats.sold_out_hits ? stats.sold_out_hits.values.count : 0;
   const rateLimit = stats.rate_limit_hits ? stats.rate_limit_hits.values.count : 0;
   const serverErr = stats.server_errors ? stats.server_errors.values.count : 0;
@@ -198,6 +201,16 @@ export function handleSummary(data) {
 
   const totalIterations = stats.iterations ? stats.iterations.values.count : 0;
   const totalHttpRequests = stats.http_reqs ? stats.http_reqs.values.count : 0;
+
+  const totalFailedRequests = rateLimit + serverErr + connErr;
+  const totalSuccessRequests = totalHttpRequests - totalFailedRequests;
+  
+  const successPercentage = totalHttpRequests > 0 ? ((totalSuccessRequests / totalHttpRequests) * 100).toFixed(2) : "0.00";
+  const failurePercentage = totalHttpRequests > 0 ? ((totalFailedRequests / totalHttpRequests) * 100).toFixed(2) : "0.00";
+
+  // Porcentaje de compras exitosas vs total de intentos de compra
+  const purchaseSuccessRate = totalAttempts > 0 ? ((reservationsCreated / totalAttempts) * 100).toFixed(2) : "0.00";
+  const purchaseFailureRate = totalAttempts > 0 ? (((totalAttempts - reservationsCreated) / totalAttempts) * 100).toFixed(2) : "0.00";
 
   const asciiArt = `
  ==========================================================
@@ -215,11 +228,18 @@ export function handleSummary(data) {
   
   [🎫 OPERACIONES DE COMPRA / RESERVA]
   --------------------------------------------------------
-   🎉 Compras Concretadas en esta Sesión: ${reservationsCreated} entradas
+   📦 Intentos de Compra Enviados:       ${totalAttempts} solicitudes
+   🎉 Compras Concretadas en esta Sesión: ${reservationsCreated} entradas (${purchaseSuccessRate}% de éxito)
+   ❌ Intentos Excedentes o Fallidos:    ${totalAttempts - reservationsCreated} solicitudes (${purchaseFailureRate}% de rechazo/espera)
    📈 Total Histórico Acumulado en Neon: ${globalTicketsSold} / ${globalTotalTickets} tickets vendidos
    ❌ Compras Rechazadas por Sold-Out:   ${soldOut} veces sin stock (409)
   
-  [⚠️ CONTROL DE ERRORES Y SATURACIÓN]
+  [⚠️ ESTADO DE LAS RESPUESTAS (PORCENTAJES)]
+  --------------------------------------------------------
+   ✅ Peticiones Exitosas (2xx/3xx/409): ${totalSuccessRequests} (${successPercentage}%)
+   ❌ Peticiones Fallidas (Network/500): ${totalFailedRequests} (${failurePercentage}%)
+  
+  [⚠️ DETALLE DE CONTROL DE ERRORES]
   --------------------------------------------------------
    🚫 Bloqueos por Límite de Tasa (429): ${rateLimit} solicitudes
    💥 Fallas de Servidor Internas (500): ${serverErr} caídas detectadas
@@ -239,4 +259,3 @@ export function handleSummary(data) {
     stdout: asciiArt,
   };
 }
-
