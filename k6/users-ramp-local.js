@@ -35,6 +35,7 @@ const rampStep = parsePositiveInt(__ENV.RAMP_STEP, 250);
 const rampDuration = String(__ENV.RAMP_DURATION || "30s");
 const holdDuration = String(__ENV.HOLD_DURATION || "30s");
 
+const sleepSeconds = Number.isFinite(Number(__ENV.SLEEP_SECONDS)) ? Number(__ENV.SLEEP_SECONDS) : 0;
 export const options = {
   scenarios: {
     users_resource_ramp: {
@@ -133,5 +134,56 @@ export default function (data) {
     "request responde 200": (currentResponse) => currentResponse.status === 200,
   });
 
-  sleep(1);
+  if (sleepSeconds > 0) {
+    sleep(sleepSeconds);
+  }
 }
+
+export function handleSummary(data) {
+  const stats = data.metrics;
+  
+  const totalIterations = stats.iterations ? stats.iterations.values.count : 0;
+  const totalHttpRequests = stats.http_reqs ? stats.http_reqs.values.count : 0;
+  const httpFailedRate = stats.http_req_failed ? (stats.http_req_failed.values.rate * 100).toFixed(2) : "0.00";
+  
+  const avgDuration = stats.http_req_duration ? stats.http_req_duration.values.avg.toFixed(2) : "0.00";
+  const p95Duration = stats.http_req_duration ? stats.http_req_duration.values["p(95)"].toFixed(2) : "0.00";
+  const maxDuration = stats.http_req_duration ? stats.http_req_duration.values.max.toFixed(2) : "0.00";
+
+  const targetName = TARGET === "events" ? "Catálogo de Eventos" : TARGET === "categories" ? "Categorías" : TARGET;
+
+  const asciiArt = `
+ ==========================================================
+ 🛡️  CROWDPASS - REPORTE DE ESTRÉS DE LECTURA MASIVA (K6)
+ ==========================================================
+  
+  [📊 RESUMEN DE EJECUCIÓN]
+  --------------------------------------------------------
+   • Recurso Evaluado:         [GET] /api/${TARGET} (${targetName})
+   • Iteraciones Completadas:  ${totalIterations} visitas simuladas
+   • Peticiones HTTP Totales:   ${totalHttpRequests} peticiones enviadas
+  
+  [👤 NIVEL DE CONCURRENCIA]
+  --------------------------------------------------------
+   👥 Usuarios Concurrentes (VUs): Max ${maxVus} simulados
+  
+  [⚠️ ESTADO DE LAS RESPUESTAS]
+  --------------------------------------------------------
+   ✅ Tasa de Éxito (Status 200):  ${(100 - Number(httpFailedRate)).toFixed(2)}% de peticiones correctas
+   ❌ Tasa de Fallo (Errores):     ${httpFailedRate}% de peticiones fallidas
+  
+  [⚡ TIEMPOS DE RESPUESTA DEL SERVIDOR]
+  --------------------------------------------------------
+   ⏱️ Tiempo Promedio:                  ${avgDuration} ms
+   ⏱️ Percentil 95 (P95):                ${p95Duration} ms
+   ⏱️ Tiempo Máximo Registrado:          ${maxDuration} ms
+ ==========================================================
+  Prueba de estrés de lectura masiva finalizada con éxito.
+ ==========================================================
+`;
+
+  return {
+    stdout: asciiArt,
+  };
+}
+

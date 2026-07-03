@@ -11,6 +11,12 @@ const pool = env.databaseUrl && env.nodeEnv !== "test"
     })
   : null;
 
+if (pool) {
+  pool.on("error", (err) => {
+    console.error("PG Pool: Error inesperado en un cliente inactivo", err.message || err);
+  });
+}
+
 async function query(text, params = [], client = pool) {
   if (!client) {
     const error = new Error("DATABASE_URL no esta configurada.");

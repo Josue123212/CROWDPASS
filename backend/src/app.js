@@ -8,6 +8,7 @@ const routes = require("./routes");
 const { globalRateLimit } = require("./middlewares/rateLimit.middleware");
 const notFoundMiddleware = require("./middlewares/notFound.middleware");
 const errorMiddleware = require("./middlewares/error.middleware");
+const structuredLogger = require("./middlewares/logger.middleware");
 
 const app = express();
 
@@ -83,6 +84,7 @@ const corsOptions = {
   },
 };
 
+app.use(structuredLogger);
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(cors(corsOptions));
 app.use(express.json());
