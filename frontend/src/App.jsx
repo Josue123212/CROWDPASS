@@ -7001,7 +7001,7 @@ function CustomerTicketsPage({ auth }) {
                 </div>
                 <div>
                   <span className="muted" style={{ display: "block", fontSize: "11px", textTransform: "uppercase", fontWeight: "bold" }}>Monto de Devolución</span>
-                  <strong style={{ color: "#4d44e3" }}>{formatCurrency(refundConfirmTarget.total_amount)}</strong>
+                  <strong style={{ color: "#4d44e3" }}>{formatCurrency(Number(refundConfirmTarget.subtotal_amount) - Number(refundConfirmTarget.discount_amount))}</strong>
                 </div>
               </div>
               <div style={{ borderTop: "1px solid #e2e8f0", paddingTop: "8px", marginTop: "4px" }}>
