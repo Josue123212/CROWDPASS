@@ -684,7 +684,7 @@ async function cancelReservation(id, user) {
           reservationId: id,
           paymentId: payment?.id || null,
           refundType: lockedReservation.is_refundable_purchase ? "refundable_purchase" : "reservation_cancelled",
-          amount: Number(lockedReservation.subtotal_amount) - Number(lockedReservation.discount_amount),
+          amount: Number(reservation.subtotal_amount) - Number(reservation.discount_amount),
           penaltyAmount: 0,
           notes: "Cancelacion procesada desde la API.",
         },
