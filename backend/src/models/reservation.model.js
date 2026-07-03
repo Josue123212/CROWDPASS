@@ -987,7 +987,7 @@ async function listRefundQueue(filters = {}, client = null) {
     params.push(staffUserId);
     conditions.push(
       `(
-        EXISTS (SELECT 1 FROM event_staff_assignments esa WHERE esa.event_id = r.event_id AND esa.user_id = ${params.length})
+        EXISTS (SELECT 1 FROM event_staff_assignments esa WHERE esa.event_id = r.event_id AND esa.user_id = $${params.length})
         OR NOT EXISTS (SELECT 1 FROM event_staff_assignments esa2 WHERE esa2.event_id = r.event_id)
       )`
     );
