@@ -661,7 +661,7 @@ async function cancelReservation(id, user) {
        SET available_tickets = available_tickets + $2,
            updated_at = NOW()
        WHERE id = $1`,
-      [lockedReservation.event_id, lockedReservation.quantity]
+      [reservation.event_id, reservation.quantity]
     );
 
     for (const item of reservationItems) {
