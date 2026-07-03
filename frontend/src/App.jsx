@@ -2729,6 +2729,22 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
   const memberLink = getRoleMemberLink(auth.currentUser?.role, auth.currentUser);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [categories, setCategories] = useState([]);
+  const [latestNotifs, setLatestNotifs] = useState([]);
+  const [isNotifDropdownOpen, setIsNotifDropdownOpen] = useState(false);
+
+  // Cargar notificaciones para el pop-over
+  useEffect(() => {
+    if (!auth.token) {
+      setLatestNotifs([]);
+      return;
+    }
+    apiRequest("/notifications?limit=5", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${auth.token}` }
+    }).then(res => {
+      setLatestNotifs(res.data || []);
+    }).catch(() => {});
+  }, [auth.token, unreadNotifications]);
   const [isDiscoverMenuOpen, setIsDiscoverMenuOpen] = useState(false);
   const [isSearchPanelOpen, setIsSearchPanelOpen] = useState(false);
   const [activeFilterModal, setActiveFilterModal] = useState("");
@@ -3215,13 +3231,78 @@ function MarketplaceTopbar({ auth, showMemberLink = false }) {
           <div className="market-topbar-actions">
             {auth.token ? (
               <>
-                <Link
-                  className={`navbar-notifications-link ${location.pathname === "/notifications" ? "active" : ""}`}
-                  to="/notifications"
-                >
-                  Notificaciones
-                  {unreadNotifications > 0 ? <span className="navbar-notifications-count">{unreadNotifications}</span> : null}
-                </Link>
+                <div className="navbar-notifications-wrapper" style={{ position: "relative" }}>
+                  <button
+                    className={`navbar-notifications-link ${location.pathname === "/notifications" ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setIsNotifDropdownOpen(!isNotifDropdownOpen)}
+                    style={{ background: "none", border: "none", cursor: "pointer", display: "flex", alignItems: "center" }}
+                  >
+                    Notificaciones
+                    {unreadNotifications > 0 ? <span className="navbar-notifications-count">{unreadNotifications}</span> : null}
+                  </button>
+                  {isNotifDropdownOpen ? (
+                    <div 
+                      className="notifications-dropdown-menu"
+                      style={{
+                        position: "absolute",
+                        top: "100%",
+                        right: 0,
+                        backgroundColor: "#ffffff",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: "12px",
+                        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)",
+                        width: "360px",
+                        zIndex: 999,
+                        marginTop: "8px",
+                        padding: "16px"
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                        <strong style={{ fontSize: "15px", color: "#1e1b4b" }}>Notificaciones Recientes</strong>
+                        {unreadNotifications > 0 ? (
+                          <span style={{ fontSize: "11px", backgroundColor: "#e0e7ff", color: "#4d44e3", padding: "2px 8px", borderRadius: "12px", fontWeight: "bold" }}>
+                            {unreadNotifications} nuevas
+                          </span>
+                        ) : null}
+                      </div>
+                      <div style={{ maxHeight: "250px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {latestNotifs.length === 0 ? (
+                          <p className="muted" style={{ fontSize: "13px", textAlign: "center", margin: "16px 0" }}>No tienes notificaciones pendientes.</p>
+                        ) : (
+                          latestNotifs.map(notif => (
+                            <div 
+                              key={notif.id} 
+                              onClick={() => {
+                                setIsNotifDropdownOpen(false);
+                                navigate("/notifications");
+                              }}
+                              style={{ 
+                                padding: "10px", 
+                                borderRadius: "8px", 
+                                backgroundColor: notif.status === "unread" ? "#f5f3ff" : "#ffffff",
+                                cursor: "pointer",
+                                borderLeft: notif.status === "unread" ? "3px solid #4d44e3" : "1px solid #e2e8f0"
+                              }}
+                            >
+                              <strong style={{ fontSize: "13px", display: "block", color: "#1e1b4b" }}>{notif.title}</strong>
+                              <p style={{ fontSize: "12px", color: "#64748b", margin: "2px 0 0 0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{notif.content}</p>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                      <div style={{ borderTop: "1px solid #f1f5f9", marginTop: "12px", paddingTop: "12px", textAlign: "center" }}>
+                        <Link 
+                          to="/notifications" 
+                          onClick={() => setIsNotifDropdownOpen(false)}
+                          style={{ fontSize: "13px", fontWeight: "bold", color: "#4d44e3", textDecoration: "none" }}
+                        >
+                          Ver todas las notificaciones
+                        </Link>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
                 {isCustomerArea ? (
                   <Link
                     aria-label="Mi perfil"
@@ -5719,11 +5800,14 @@ function NotificationsPage({ auth }) {
           <p className="muted">Aqui veras novedades importantes sobre eventos, reservas y reembolsos.</p>
         </div>
         <div className="cta-row">
-          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-            <option value="all">Todas</option>
-            <option value="unread">No leidas</option>
-            <option value="read">Leidas</option>
-          </select>
+          <div className="notification-filter-container">
+            <span className="muted" style={{ fontSize: "14px" }}>Filtrar:</span>
+            <select className="notification-filter-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="all">Todas</option>
+              <option value="unread">No leídas</option>
+              <option value="read">Leídas</option>
+            </select>
+          </div>
           <button className="ghost-button" type="button" disabled={isMarkingAll} onClick={markAllAsRead}>
             {isMarkingAll ? "Marcando..." : "Marcar todo como leido"}
           </button>
