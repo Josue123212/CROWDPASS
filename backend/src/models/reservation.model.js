@@ -126,6 +126,8 @@ async function findReservationRecordByIdForUpdate(id, client) {
             user_id,
             event_id,
             quantity,
+            subtotal_amount,
+            discount_amount,
             total_amount,
             status,
             payment_status,
@@ -900,7 +902,7 @@ async function createRefundRecord(refundData, client) {
        processed_at,
        notes
      )
-     VALUES ($1, $2, $3, $4, $5, $6, ${shouldSetProcessedAt ? "NOW()" : "NULL"}, $7)
+     VALUES ($1, CAST($2 AS INTEGER), $3, $4, CAST($5 AS NUMERIC), CAST($6 AS NUMERIC), ${shouldSetProcessedAt ? "NOW()" : "NULL"}, $7)
      RETURNING id`,
     [reservationId, paymentId, refundType, normalizedStatus, amount, penaltyAmount, notes || null],
     client
@@ -984,7 +986,10 @@ async function listRefundQueue(filters = {}, client = null) {
   if (staffUserId !== null) {
     params.push(staffUserId);
     conditions.push(
-      `EXISTS (SELECT 1 FROM event_staff_assignments esa WHERE esa.event_id = r.event_id AND esa.user_id = $${params.length})`
+      `(
+        EXISTS (SELECT 1 FROM event_staff_assignments esa WHERE esa.event_id = r.event_id AND esa.user_id = ${params.length})
+        OR NOT EXISTS (SELECT 1 FROM event_staff_assignments esa2 WHERE esa2.event_id = r.event_id)
+      )`
     );
   }
 

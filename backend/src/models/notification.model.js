@@ -157,16 +157,16 @@ async function createNotificationsBulkDeduped(
 
   const result = await db.query(
     `INSERT INTO notifications (user_id, type, title, message, data, status, created_at)
-     SELECT uid, $2, $3, $4, $5::jsonb, 'unread', NOW()
+     SELECT uid, CAST($2 AS VARCHAR), $3, $4, $5::jsonb, 'unread', NOW()
      FROM UNNEST($1::int[]) AS uid
      WHERE NOT EXISTS (
        SELECT 1
        FROM notifications n
        WHERE n.user_id = uid
-         AND n.type = $2
+         AND n.type = CAST($2 AS VARCHAR)
          AND n.status = 'unread'
-         AND n.created_at >= NOW() - make_interval(secs => $7::int)
-         AND (n.data ->> $6) = $8
+         AND n.created_at >= NOW() - make_interval(secs => CAST($7 AS INTEGER))
+         AND (n.data ->> CAST($6 AS TEXT)) = CAST($8 AS TEXT)
      )`,
     [normalizedUserIds, normalizedType, title, message, JSON.stringify(data || {}), key, window, value],
     client || undefined

@@ -1177,26 +1177,26 @@ async function requestRefund(reservationId, user) {
   try {
     await client.query("BEGIN");
 
-    const lockedReservation = await reservationModel.findReservationRecordByIdForUpdate(reservationId, client);
+    const reservation = await reservationModel.findReservationRecordByIdForUpdate(reservationId, client);
 
-    if (!lockedReservation) {
+    if (!reservation) {
       throw new ApiError(404, "Reserva no encontrada.");
     }
 
-    if (Number(lockedReservation.user_id) !== Number(user.sub)) {
+    if (Number(reservation.user_id) !== Number(user.sub)) {
       throw new ApiError(403, "No tienes permisos para solicitar el reembolso de esta reserva.");
     }
 
-    if (lockedReservation.expired_at) {
+    if (reservation.expired_at) {
       throw new ApiError(409, "No se puede solicitar reembolso porque la reserva esta expirada.");
     }
 
-    const hasCapturedPayment = ["simulated_paid", "completed"].includes(lockedReservation.payment_status);
+    const hasCapturedPayment = ["simulated_paid", "completed"].includes(reservation.payment_status);
     if (!hasCapturedPayment) {
       throw new ApiError(409, "No se puede solicitar reembolso porque no hay un pago confirmado.");
     }
 
-    if (!lockedReservation.is_refundable_purchase) {
+    if (!reservation.is_refundable_purchase) {
       throw new ApiError(409, "Esta compra no incluye seguro reembolsable.");
     }
 
@@ -1210,7 +1210,7 @@ async function requestRefund(reservationId, user) {
       throw new ApiError(409, "El reembolso de esta reserva ya fue completado.");
     }
 
-    if (lockedReservation.status !== "confirmed") {
+    if (reservation.status !== "confirmed") {
       throw new ApiError(409, "Solo puedes solicitar reembolso para reservas confirmadas.");
     }
 
@@ -1222,7 +1222,7 @@ async function requestRefund(reservationId, user) {
        FROM events
        WHERE id = $1
        FOR UPDATE`,
-      [lockedReservation.event_id]
+      [reservation.event_id]
     );
     const eventValidation = eventValidationResult.rows[0];
     if (!eventValidation) {
@@ -1237,8 +1237,9 @@ async function requestRefund(reservationId, user) {
       throw new ApiError(409, "Solo puedes solicitar reembolso por seguro si faltan 24 horas o mas para el evento.");
     }
 
-    const reservation = await reservationModel.findReservationById(reservationId, client);
-    const reservationItems = Array.isArray(reservation?.items) ? reservation.items : [];
+    // Reutilizamos la variable de reserva ya declarada
+    const fullReservation = await reservationModel.findReservationById(reservationId, client);
+    const reservationItems = Array.isArray(fullReservation?.items) ? fullReservation.items : [];
 
     const payment = await reservationModel.findPaymentByReservationId(reservationId, client);
     const refund = await reservationModel.createRefundRecord(
@@ -1247,7 +1248,7 @@ async function requestRefund(reservationId, user) {
         paymentId: payment?.id || null,
         refundType: "refundable_purchase",
         status: "pending",
-        amount: Number(lockedReservation.subtotal_amount) - Number(lockedReservation.discount_amount),
+        amount: Number(reservation.subtotal_amount) - Number(reservation.discount_amount),
         penaltyAmount: 0,
         notes: null,
       },
@@ -1258,16 +1259,16 @@ async function requestRefund(reservationId, user) {
 
     await client.query(
       `UPDATE events
-       SET available_tickets = LEAST(total_tickets, available_tickets + $2),
+       SET available_tickets = LEAST(total_tickets, available_tickets + CAST($2 AS INTEGER)),
            updated_at = NOW()
        WHERE id = $1`,
-      [lockedReservation.event_id, lockedReservation.quantity]
+      [reservation.event_id, reservation.quantity]
     );
 
     for (const item of reservationItems) {
       await client.query(
         `UPDATE event_ticket_types
-         SET stock_available = LEAST(stock_total, stock_available + $2),
+         SET stock_available = LEAST(stock_total, stock_available + CAST($2 AS INTEGER)),
              updated_at = NOW()
          WHERE id = $1`,
         [item.ticket_type_id, item.quantity]
@@ -1278,16 +1279,16 @@ async function requestRefund(reservationId, user) {
 
     await notificationModel.createNotification(
       {
-        userId: lockedReservation.user_id,
+        userId: reservation.user_id,
         type: "refund_requested",
         title: "Solicitud de reembolso registrada",
         message: `Recibimos tu solicitud de reembolso por seguro para la reserva ${reservationId}. Nuestro equipo la revisara.`,
-        data: { reservationId: Number(reservationId), eventId: Number(lockedReservation.event_id) },
+        data: { reservationId: Number(reservationId), eventId: Number(reservation.event_id) },
       },
       client
     );
 
-    const staffUserIds = await reservationModel.listStaffUserIdsByEvent(lockedReservation.event_id, client);
+    const staffUserIds = await reservationModel.listStaffUserIdsByEvent(reservation.event_id, client);
     if (staffUserIds.length > 0) {
       await notificationModel.createNotificationsBulkDeduped(
         {
@@ -1295,7 +1296,7 @@ async function requestRefund(reservationId, user) {
           type: "refund_action_required",
           title: "Reembolso por seguro pendiente",
           message: `Nuevo reembolso por seguro para la reserva ${reservationId} del evento "${eventValidation.title}".`,
-          data: { reservationId: Number(reservationId), eventId: Number(lockedReservation.event_id) },
+          data: { reservationId: Number(reservationId), eventId: Number(reservation.event_id) },
           dedupeKey: "reservationId",
           dedupeValue: Number(reservationId),
           windowSeconds: 3600,
@@ -1311,7 +1312,7 @@ async function requestRefund(reservationId, user) {
             type: "refund_action_required_admin",
             title: "Reembolso por seguro sin staff asignado",
             message: `Nuevo reembolso por seguro (reserva ${reservationId}) para el evento "${eventValidation.title}". No hay staff asignado al evento.`,
-            data: { reservationId: Number(reservationId), eventId: Number(lockedReservation.event_id) },
+            data: { reservationId: Number(reservationId), eventId: Number(reservation.event_id) },
             dedupeKey: "reservationId",
             dedupeValue: Number(reservationId),
             windowSeconds: 3600,
